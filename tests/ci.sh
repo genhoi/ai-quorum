@@ -36,7 +36,7 @@ echo "== plan stage: three advisors, judge picks B, refuter checks the winner"
 RUN="$("$Q" consult --brief "$TMP/q.md" --advisors fake:a,fake:b,fake:c --judge fake:x 2>/dev/null)"
 [ -d "$RUN/fake:a/snapshot" ] && [ -f "$RUN/fake:a/snapshot/vendor/lib.txt" ]; pass "advisor snapshots with copied deps"
 grep -q 'Профиль проекта' "$RUN/prompt.md"; pass "advisor prompt carries the brief and the profile"
-for _ in 1 2 3 4 5 6; do "$Q" wait "$RUN" --interval 1 --max 20 >/dev/null && break; done
+for _ in 1 2 3 4 5 6; do "$Q" wait "$RUN" --interval 1 --max 20 | grep -q "STATE: ready" && break; done
 [ -f "$RUN/verdict.md" ] || fail "no verdict.md"
 WIN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["B"])' "$RUN/letters.json")"   # the stub judge always picks B
 grep -q "^## Выбор судьи: B = $WIN" "$RUN/verdict.md"; pass "verdict names the winner (letters resolved)"
@@ -55,7 +55,7 @@ pass "summary.json: winner, rounds, proposals"
 
 echo "== plan stage: judge finds nothing acceptable → one retry round → judge again"
 RUN2="$("$Q" consult --brief "$TMP/q.md" --advisors fake:a,fake:b --judge fake:none --no-refute 2>/dev/null)"
-for _ in 1 2 3 4 5 6 7 8; do "$Q" wait "$RUN2" --interval 1 --max 20 >/dev/null && break; done
+for _ in 1 2 3 4 5 6 7 8; do "$Q" wait "$RUN2" --interval 1 --max 20 | grep -q "STATE: ready" && break; done
 [ -d "$RUN2/retry-fake:a" ] && [ -d "$RUN2/judge-2" ]; pass "retry jobs and a second judge round"
 grep -qE 'нет улики|тест не назван' "$RUN2/retry-fake:a/prompt.md"; pass "retry message carries the judge's feedback for that letter"
 grep -q 'Повторный ответ' "$RUN2/judge-2/prompt.md"; pass "second judge round sees the retry answers"
@@ -65,7 +65,7 @@ echo "== done stage: findings → claims → refuters from other families"
 echo "    return p.amount - amount - 1" >> billing/refunds.py   # uncommitted change to accept
 RUN3="$("$Q" consult --brief "$TMP/q.md" --stage "done" --advisors fake:a,fake:b --judge fake:x 2>/dev/null)"
 grep -q 'Этап: \*\*приёмка\*\*' "$RUN3/header.md" && grep -q 'refunds.py' "$RUN3/header.md"; pass "acceptance header with the diff stat"
-for _ in 1 2 3 4 5 6; do "$Q" wait "$RUN3" --interval 1 --max 20 >/dev/null && break; done
+for _ in 1 2 3 4 5 6; do "$Q" wait "$RUN3" --interval 1 --max 20 | grep -q "STATE: ready" && break; done
 python3 - "$RUN3/claims.json" <<'PY'
 import json, sys
 c = json.load(open(sys.argv[1]))

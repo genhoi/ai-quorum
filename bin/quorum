@@ -26,7 +26,8 @@ quorum — a council of models: independent answers, a judge, a refuter
       --timeout SEC                     per advisor / refuter (default QUORUM_TIMEOUT)
       --deps copy|hardlink|symlink|none how ignored dependencies get into snapshots (default QUORUM_DEPS)
       --link PATH                       extra dependency path (repeatable)
-  quorum wait [RUN] [--max SEC]         advance the run and wait; exit 0 = verdict.md is ready, exit 3 = call again
+  quorum wait [RUN] [--max SEC]         advance the run and wait up to SEC; first line "STATE: ready" or "STATE: running"
+                                        (exit code is 0 in both cases; call again while running)
   quorum status [RUN]                   jobs and progress
   quorum advance [RUN]                  one step of the state machine (wait does this for you)
   quorum ask RUN JOB "question"         continue an advisor's session (a focused follow-up); prints the answer
@@ -316,9 +317,11 @@ cmd_wait() {
   local t0; t0=$(date +%s)
   while :; do
     local out rc; out="$(cmd_advance "$run")"; rc=$?
-    if [ "$rc" -eq 0 ]; then cmd_status "$run"; echo "verdict ready: $out"; return 0; fi
+    if [ "$rc" -eq 0 ]; then echo "STATE: ready — $out"; cmd_status "$run"; return 0; fi
     case "$out" in launched*) echo "$out";; esac
-    if [ $(( $(date +%s) - t0 )) -ge "$max" ]; then cmd_status "$run"; echo "still working — call quorum wait $run again"; return 3; fi
+    if [ $(( $(date +%s) - t0 )) -ge "$max" ]; then
+      echo "STATE: running — not an error; call again: quorum wait $run --max $max"; cmd_status "$run"; return 0
+    fi
     sleep "$interval"
   done
 }
