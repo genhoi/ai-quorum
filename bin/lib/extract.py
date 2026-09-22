@@ -709,11 +709,20 @@ def digest(home, since=None):
 
     usage, notes = load("usage.jsonl"), load("feedback.jsonl")
     # a verdict event carries the run summary nested under "summary": flatten it for the counters below
-    usage = [dict(r, **(r.get("summary") or {})) if r.get("event") == "verdict" else r for r in usage]
+    usage = [dict(r, **(r.get("summary") or {})) if r.get("event") in ("verdict", "judge_done") else r for r in usage]
+    # one record per run for the outcome counters: the verdict, or the last judge round when the run
+    # was cleaned before the verdict was written
+    outcome = {}
+    for r in usage:
+        if r.get("event") == "judge_done" and r.get("run") not in outcome:
+            outcome[r["run"]] = r
+        if r.get("event") == "verdict":
+            outcome[r["run"]] = r
+    verdict_like = list(outcome.values())
     out = [f"# quorum — журнал ({os.uname().nodename}{', с ' + since if since else ''})", ""]
     consults = [r for r in usage if r.get("event") == "consult"]
     verdicts = [r for r in usage if r.get("event") == "verdict"]
-    out.append(f"- советов запущено: {len(consults)} · завершено вердиктом: {len(verdicts)} · заметок: {len(notes)}")
+    out.append(f"- советов запущено: {len(consults)} · завершено вердиктом: {len(verdicts)} · убрано до вердикта после суда: {len(verdict_like) - len(verdicts)} · заметок: {len(notes)}")
     if consults:
         stages, harness, projects = {}, {}, set()
         for r in consults:
@@ -723,7 +732,7 @@ def digest(home, since=None):
         out.append("- этапы: " + ", ".join(f"{k} ×{v}" for k, v in sorted(stages.items(), key=lambda x: -x[1])))
         out.append("- исполнители: " + ", ".join(f"{k} ×{v}" for k, v in sorted(harness.items(), key=lambda x: -x[1])))
         out.append(f"- проекты: {', '.join(sorted(p for p in projects if p))}")
-    plan = [r for r in verdicts if r.get("stage") in ("plan", "stuck")]
+    plan = [r for r in verdict_like if r.get("stage") in ("plan", "stuck")]
     if plan:
         winners, rounds2, none, nothing = {}, 0, 0, 0
         for r in plan:
@@ -740,7 +749,7 @@ def digest(home, since=None):
                 f"- без приемлемого решения: {none} · понадобился второй круг: {rounds2}",
                 f"- ответов «делать ничего не нужно»: {nothing}",
                 f"- средняя стоимость совета: ${sum(r.get('cost_usd') or 0 for r in plan) / len(plan):.2f}"]
-    done = [r for r in verdicts if r.get("stage") == "done"]
+    done = [r for r in verdict_like if r.get("stage") == "done"]
     if done:
         c = sum(r.get("claims") or 0 for r in done)
         conf = sum(r.get("confirmed") or 0 for r in done)
@@ -749,7 +758,7 @@ def digest(home, since=None):
                 f"- находок всего: {c} · подтверждено: {conf} · опровергнуто: {ref} · не проверено: {c - conf - ref}",
                 f"- средняя стоимость приёмки: ${sum(r.get('cost_usd') or 0 for r in done) / len(done):.2f}"]
     stats = {}
-    for v in verdicts:
+    for v in verdict_like:
         for name, j in (v.get("jobs") or {}).items():
             key = f"{j.get('backend')} ({j.get('role')})"
             st = stats.setdefault(key, {"n": 0, "done": 0, "dur": [], "cost": []})

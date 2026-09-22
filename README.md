@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/hero.png" alt="Three advisors hold plans of different sizes, a judge at a lectern points at the smallest one, a refuter examines it through a magnifying glass, discarded scraps lie on the floor" width="100%">
+</p>
+
 # quorum — a council of models for the implementing agent
 
 A skill for coding agents (Claude Code, Codex, Kimi, Grok). At three points of a task the

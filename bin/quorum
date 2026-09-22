@@ -38,7 +38,7 @@ quorum — a council of models: independent answers, a judge, a refuter
   quorum digest [--since DATE]          usage journal + notes as Markdown (for a retrospective)
   quorum logs RUN JOB                   stderr tail and progress of one job
   quorum runs                           runs of the current project
-  quorum clean [RUN|--all]              remove worktrees and the run directory
+  quorum clean [RUN|--all] [--force]    remove worktrees and the run directory (refuses while jobs run unless --force)
 USAGE
 }
 
@@ -277,6 +277,10 @@ cmd_advance() {
   fi
   last="$run/judge-$rounds"
   local choice; choice="$(py judge-choice "$last/report.md" | python3 -c 'import json,sys; print(json.load(sys.stdin)["choice"])')"
+  if [ "$(status_of "$run" "judge-$rounds")" = "done" ] && [ ! -f "$last/logged" ]; then
+    py summary "$run" > "$run/summary.json" 2>/dev/null || true
+    usage_log judge_done run="$(basename "$run")" round="$rounds" choice="$choice" summary="@$run/summary.json"; touch "$last/logged"
+  fi
   if [ "$choice" = none ] && [ "$(status_of "$run" "judge-$rounds")" = "done" ]; then
     if [ "$rounds" -eq 1 ] && [ "${QUORUM_RETRY:-1}" -ge 1 ] && [ -z "$(run_jobs "$run" retry)" ]; then
       local a letter fb tmp; tmp="$(mktemp)"
@@ -323,7 +327,7 @@ cmd_wait() {
     if [ "$rc" -eq 0 ]; then echo "STATE: ready — $out"; cmd_status "$run"; return 0; fi
     case "$out" in launched*) echo "$out";; esac
     if [ $(( $(date +%s) - t0 )) -ge "$max" ]; then
-      echo "STATE: running — not an error; call again: quorum wait $run --max $max"; cmd_status "$run"; return 0
+      echo "STATE: running — not an error; verdict.md does not exist yet, do not read or clean the run; call again: quorum wait $run --max $max"; cmd_status "$run"; return 0
     fi
     sleep "$interval"
   done
@@ -363,18 +367,34 @@ cmd_digest() { local since=""; [ "${1:-}" != "--since" ] || since="$2"; py diges
 cmd_logs() { local run; run="$(resolve_run "$1")"; local d="$run/$2"; echo "--- stderr (tail) ---"; tail -n 30 "$d/stderr.log" 2>/dev/null; echo "--- progress ---"; py progress "$(cat "$d/format")" "$d/raw"; }
 cmd_runs() { ls -1d "$QR_RUNS/$(proj_name)"-* 2>/dev/null || echo "no runs"; }
 
+# Files created by tests inside docker belong to root and survive rm: delete them through a container.
+rm_stubborn() { # rm_stubborn DIR
+  rm -rf "$1" 2>/dev/null; [ -e "$1" ] || return 0
+  if command -v docker >/dev/null 2>&1; then
+    docker run --rm -v "$1:/target" alpine sh -c 'rm -rf /target/* /target/.[!.]* 2>/dev/null; true' >/dev/null 2>&1
+    rm -rf "$1" 2>/dev/null
+  fi
+  [ ! -e "$1" ] || { warn "could not remove $1 (files owned by another user; try: sudo rm -rf '$1')"; return 1; }
+}
+
 cmd_clean() {
-  local root; root="$(proj_root)"; local targets=()
-  if [ "${1:-}" = "--all" ]; then mapfile -t targets < <(ls -1d "$QR_RUNS/$(basename "$root")"-* 2>/dev/null)
-  else targets=("$(resolve_run "${1:-}")"); fi
+  local root; root="$(proj_root)"; local targets=() force="" arg=""
+  while [ $# -gt 0 ]; do case "$1" in --force) force=1; shift;; *) arg="$1"; shift;; esac; done
+  if [ "$arg" = "--all" ]; then mapfile -t targets < <(ls -1d "$QR_RUNS/$(basename "$root")"-* 2>/dev/null)
+  else targets=("$(resolve_run "$arg")"); fi
   local run j
   for run in "${targets[@]}"; do
+    reap_dead "$run"
+    local busy; busy="$(busy_jobs "$run")"
+    if [ -n "$busy" ] && [ -z "$force" ]; then
+      echo "not removed: $run — still running: $busy. Wait for STATE: ready (quorum wait $run) or pass --force to kill them."; continue
+    fi
     for j in $(run_jobs "$run"); do
       [ -f "$run/$j/pid" ] && kill "$(cat "$run/$j/pid")" 2>/dev/null
       [ -L "$run/$j/snapshot" ] && rm -f "$run/$j/snapshot"
       remove_worktree "$root" "$run/$j/snapshot"
     done
-    rm -rf "$run"; echo "removed $run"; usage_log clean run="$(basename "$run")"
+    rm_stubborn "$run" && echo "removed $run"; usage_log clean run="$(basename "$run")" forced="${force:-0}"
   done
   git -C "$root" worktree prune 2>/dev/null || true
 }

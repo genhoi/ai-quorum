@@ -110,7 +110,7 @@ deps_report() { # deps_report PROJ_ROOT LINKS...
 
 remove_worktree() { # remove_worktree PROJ_ROOT DEST
   [ -d "$2" ] || return 0
-  git -C "$1" worktree remove --force "$2" >/dev/null 2>&1 || rm -rf "$2"
+  git -C "$1" worktree remove --force "$2" >/dev/null 2>&1 || rm -rf "$2" 2>/dev/null || true
   git -C "$1" worktree prune >/dev/null 2>&1 || true
 }
 
