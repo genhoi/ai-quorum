@@ -34,9 +34,9 @@ column or in a separate table". The judge: "judge opus" or `quorum config set QU
 ```bash
 quorum brief --out /tmp/q.md            # brief template; fill it in
 quorum consult --brief /tmp/q.md        # --stage plan|stuck|done, --advisors, --judge, --plan FILE
-quorum wait RUN --max 110               # first line: STATE: ready | STATE: running (call again)
+quorum wait RUN --max 110               # the run advances by itself; first line: STATE: ready | STATE: running (call again)
 cat RUN/verdict.md
-quorum feedback RUN "what helped, what was accepted, what was rejected"
+quorum feedback RUN "what helped, what was accepted, what was rejected"   # refused before the verdict
 quorum clean RUN
 ```
 

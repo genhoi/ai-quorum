@@ -31,9 +31,9 @@
 ```bash
 quorum brief --out /tmp/q.md            # шаблон брифа; заполнить
 quorum consult --brief /tmp/q.md        # --stage plan|stuck|done, --advisors, --judge, --plan FILE
-quorum wait RUN --max 110               # первая строка: STATE: ready | STATE: running (позвать снова)
+quorum wait RUN --max 110               # прогон идёт сам; первая строка: STATE: ready | STATE: running (позвать снова)
 cat RUN/verdict.md
-quorum feedback RUN "что помогло, что принято, что отклонено"
+quorum feedback RUN "что помогло, что принято, что отклонено"   # без вердикта откажет
 quorum clean RUN
 ```
 

@@ -36,8 +36,11 @@ echo "== plan stage: three advisors, judge picks B, refuter checks the winner"
 RUN="$("$Q" consult --brief "$TMP/q.md" --advisors fake:a,fake:b,fake:c --judge fake:x 2>/dev/null)"
 [ -d "$RUN/fake:a/snapshot" ] && [ -f "$RUN/fake:a/snapshot/vendor/lib.txt" ]; pass "advisor snapshots with copied deps"
 grep -q 'Профиль проекта' "$RUN/prompt.md"; pass "advisor prompt carries the brief and the profile"
-for _ in 1 2 3 4 5 6; do "$Q" wait "$RUN" --interval 1 --max 20 | grep -q "STATE: ready" && break; done
-[ -f "$RUN/verdict.md" ] || fail "no verdict.md"
+"$Q" feedback "$RUN" "слишком рано" > "$TMP/out" 2>&1 && fail "feedback accepted before the verdict"; grep -q 'no verdict yet' "$TMP/out"; pass "feedback refuses a note before the verdict"
+# no `wait` here: the job wrappers advance the run themselves (judge → refuter → verdict)
+for _ in $(seq 1 60); do [ -f "$RUN/verdict.md" ] && break; sleep 1; done
+[ -f "$RUN/verdict.md" ] || fail "no verdict.md: the run did not advance on its own (see $RUN/advance.log)"
+pass "the run reaches the verdict without anyone calling wait"
 WIN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["B"])' "$RUN/letters.json")"   # the stub judge always picks B
 grep -q "^## Выбор судьи: B = $WIN" "$RUN/verdict.md"; pass "verdict names the winner (letters resolved)"
 REF="$(ls -d "$RUN"/refute-* | head -1)"; [ -n "$REF" ] && [ "$(cat "$REF/backend")" != "$WIN" ]; pass "refuter from another family checked the winner"
@@ -51,7 +54,8 @@ assert s["stage"] == "plan" and s["winner"] == letters["B"] and s["rounds"] == 1
 assert s["proposals"]["fake:b"]["nothing_needed"] is True and s["proposals"]["fake:a"]["new_concepts"] == 2, s
 PY
 pass "summary.json: winner, rounds, proposals"
-"$Q" feedback "$RUN" "принято: ничего не менять" >/dev/null; grep -q 'принято' "$QUORUM_HOME/feedback.jsonl"; pass "feedback note"
+(cd / && "$Q" feedback "$RUN" "принято: ничего не менять" >/dev/null); grep -q 'принято' "$QUORUM_HOME/feedback.jsonl"; pass "feedback note"
+grep -c '"project": "fixture"' "$QUORUM_HOME/usage.jsonl" > "$TMP/out"; [ "$(cat "$TMP/out")" -ge 4 ] && ! grep -q '"project": "/"' "$QUORUM_HOME/usage.jsonl"; pass "journal takes the project from the run, not from the caller's directory"
 
 echo "== plan stage: judge finds nothing acceptable → one retry round → judge again"
 RUN2="$("$Q" consult --brief "$TMP/q.md" --advisors fake:a,fake:b --judge fake:none --no-refute 2>/dev/null)"

@@ -23,6 +23,9 @@ main() {
   fi
   local code=$?
   finalize_job "$RUN" "$J" "$code"
+  # the run drives itself: the last job to finish launches the next role (judge, retry, refuter)
+  # or writes the verdict. `quorum wait` does the same, so nothing depends on the implementer polling.
+  bash "$QR_SKILL_DIR/bin/quorum" advance "$RUN" >> "$RUN/advance.log" 2>&1 || true
 }
 main "$@"
 exit $?

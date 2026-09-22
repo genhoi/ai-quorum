@@ -29,10 +29,10 @@ quorum — a council of models: independent answers, a judge, a refuter
       --timeout SEC                     per advisor / refuter (default QUORUM_TIMEOUT)
       --deps copy|hardlink|symlink|none how ignored dependencies get into snapshots (default QUORUM_DEPS)
       --link PATH                       extra dependency path (repeatable)
-  quorum wait [RUN] [--max SEC]         advance the run and wait up to SEC; first line "STATE: ready" or "STATE: running"
+  quorum wait [RUN] [--max SEC]         wait up to SEC for the verdict; first line "STATE: ready" or "STATE: running"
                                         (exit code is 0 in both cases; call again while running)
   quorum status [RUN]                   jobs and progress
-  quorum advance [RUN]                  one step of the state machine (wait does this for you)
+  quorum advance [RUN]                  one step of the state machine (runs by itself when a job ends; wait repeats it)
   quorum ask RUN JOB "question"         continue an advisor's session (a focused follow-up); prints the answer
   quorum feedback RUN "note"            the implementer's note: what helped, what was accepted or rejected
   quorum digest [--since DATE]          usage journal + notes as Markdown (for a retrospective)
@@ -43,7 +43,7 @@ USAGE
 }
 
 lang_dir() { [ -d "$QR_SKILL_DIR/prompts/$QUORUM_LANG" ] || die "unknown language '$QUORUM_LANG'"; printf '%s' "$QR_SKILL_DIR/prompts/$QUORUM_LANG"; }
-meta_get() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print(v if not isinstance(v,list) else " ".join(v))' "$1/meta.json" "$2" 2>/dev/null; }
+meta_get() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print("" if v is None else v if not isinstance(v,list) else " ".join(v))' "$1/meta.json" "$2" 2>/dev/null; }
 
 cmd_doctor() {
   local b out rc
@@ -132,7 +132,7 @@ new_job() {
            cp "$run/$parent/codex-settings.json" "$d/" 2>/dev/null || true ;;
   esac
   echo queued > "$d/status"
-  QR_EFFORT="$effort" setsid nohup bash "$QR_SKILL_DIR/bin/lib/launch.sh" "$run" "$name" >/dev/null 2>&1 < /dev/null &
+  QR_EFFORT="$effort" setsid nohup bash "$QR_SKILL_DIR/bin/lib/launch.sh" "$run" "$name" >/dev/null 2>&1 < /dev/null 9>&- &
   echo $! > "$d/pid"
 }
 
@@ -190,11 +190,11 @@ cmd_consult() {
     [ -z "$plan" ] || { echo "---"; echo; echo "# Документ (plan.md, лежит и в корне снапшота)"; echo; cat "$plan"; echo; }
   } > "$run/prompt.md"
 
-  python3 - "$run" "$name" "$stage" "$base" "$snap_commit" "$list" "$judge" "$refute" <<'PY'
+  python3 - "$run" "$name" "$stage" "$base" "$snap_commit" "$list" "$judge" "$refute" "$(usage_harness)" <<'PY'
 import json, sys, datetime
-run, name, stage, base, snap, lst, judge, refute = sys.argv[1:9]
+run, name, stage, base, snap, lst, judge, refute, harness = sys.argv[1:10]
 json.dump({"project": name, "stage": stage, "base": base, "snapshot_commit": snap, "advisors": lst.split(),
-           "judge": judge if stage != "done" else None, "refute": refute == "1",
+           "judge": judge if stage != "done" else None, "refute": refute == "1", "harness": harness,
            "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
           open(f"{run}/meta.json", "w"), ensure_ascii=False, indent=1)
 PY
@@ -233,17 +233,21 @@ cmd_status() {
   [ ! -f "$run/verdict.md" ] || echo "verdict: $run/verdict.md"
 }
 
-write_verdict() {
+write_verdict() { # verdict.md appears atomically: readers poll for the file and must never see it half-written
   local run="$1"
-  py verdict "$run" > "$run/verdict.md"
   py summary "$run" > "$run/summary.json" 2>/dev/null || true
+  py verdict "$run" > "$run/.verdict.tmp" && mv "$run/.verdict.tmp" "$run/verdict.md"
   usage_log verdict run="$(basename "$run")" stage="$(meta_get "$run" stage)" summary="@$run/summary.json"
   echo "$run/verdict.md"
 }
 
 # One step of the state machine. Exit 0 = verdict.md written, 3 = jobs running or just launched.
+# Called by `wait`, by every job wrapper when its job ends (launch.sh) and by hand; the lock on the
+# run keeps two callers from launching the same role twice. Jobs are spawned with fd 9 closed.
 cmd_advance() {
-  local run; run="$(resolve_run "${1:-}")"; reap_dead "$run"
+  local run; run="$(resolve_run "${1:-}")"
+  exec 9>"$run/.advance.lock"; flock -w 600 9 || { echo "advance: the run is locked by another caller"; return 3; }
+  reap_dead "$run"
   [ ! -f "$run/verdict.md" ] || { echo "$run/verdict.md"; return 0; }
   local busy; busy="$(busy_jobs "$run")"
   [ -z "$busy" ] || { echo "running: $busy"; return 3; }
@@ -309,7 +313,7 @@ cmd_advance() {
     if [ -n "$r" ]; then
       local tmp; tmp="$(mktemp)"
       { cat "$run/header.md"; echo; py refute-prompt "$run" "refute-$r" "$pdir/refuter.md"; } > "$tmp"
-      new_job "$run" "refute-$r" "$r" refuter run "$tmp" new "$timeout" "$QUORUM_ADVISOR_EFFORT" && { rm -f "$tmp"; usage_log refute run="$(basename "$run")" refuters="$r" claims=0; echo "launched refuter ($r) on the winner $winner"; return 3; }
+      new_job "$run" "refute-$r" "$r" refuter run "$tmp" new "$timeout" "$QUORUM_ADVISOR_EFFORT" && { rm -f "$tmp"; usage_log refute run="$(basename "$run")" refuters="$r"; echo "launched refuter ($r) on the winner $winner"; return 3; }
       rm -f "$tmp"
     else warn "no backend from another family to refute $winner — skipped"; fi
   fi
@@ -351,8 +355,10 @@ cmd_feedback() {
   [ $# -ge 2 ] || die 'feedback RUN "note"'
   local run; run="$(resolve_run "$1")"; shift; local text="$*"
   [ -n "$text" ] || die "feedback: the note is empty"
+  [ -f "$run/verdict.md" ] || die "feedback: no verdict yet ($run/verdict.md does not exist). A note is about what the verdict gave; run: quorum wait $run"
   printf '%s\n' "$text" > "$run/feedback.md"
-  python3 - "$QR_HOME/feedback.jsonl" "$(basename "$run")" "$(proj_name)" "$(usage_harness)" "$(meta_get "$run" stage)" "$run/feedback.md" <<'PY'
+  local harness; harness="$(meta_get "$run" harness)"; [ -n "$harness" ] || harness="$(usage_harness)"
+  python3 - "$QR_HOME/feedback.jsonl" "$(basename "$run")" "$(meta_get "$run" project)" "$harness" "$(meta_get "$run" stage)" "$run/feedback.md" <<'PY'
 import json, sys, datetime
 path, run, project, harness, stage, note = sys.argv[1:7]
 rec = {"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "run": run, "stage": stage,

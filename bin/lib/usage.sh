@@ -21,9 +21,16 @@ usage_log() { # usage_log EVENT [key=value ...]   (values are strings; key=@FILE
   [ -z "${QUORUM_NO_USAGE:-}" ] || return 0
   local ev="$1"; shift
   mkdir -p "$QR_HOME"
-  python3 - "$QR_HOME/usage.jsonl" "$ev" "$(usage_harness)" "$(proj_name 2>/dev/null || basename "$PWD")" "$@" <<'PY' 2>/dev/null || true
+  # project and harness come from the run that the event is about (meta.json), not from the caller's
+  # directory: advance runs from the job wrappers and by hand from anywhere
+  local meta="" a; for a in "$@"; do case "$a" in run=*) [ -f "$QR_RUNS/${a#run=}/meta.json" ] && meta="$QR_RUNS/${a#run=}/meta.json";; esac; done
+  python3 - "$QR_HOME/usage.jsonl" "$ev" "$(usage_harness)" "$(proj_name 2>/dev/null || basename "$PWD")" "$meta" "$@" <<'PY' 2>/dev/null || true
 import json, sys, datetime, os
-path, event, harness, project, *kv = sys.argv[1:]
+path, event, harness, project, meta, *kv = sys.argv[1:]
+if meta:
+    try:
+        m = json.load(open(meta)); project = m.get("project") or project; harness = m.get("harness") or harness
+    except Exception: pass
 rec = {"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
        "event": event, "project": project, "harness": harness, "host": os.uname().nodename}
 for item in kv:
