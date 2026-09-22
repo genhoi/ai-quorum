@@ -3,6 +3,9 @@
 # snapshots of the repository, a judge from another model family picks the simplest correct answer,
 # a refuter must disprove what survives. Harness-agnostic: needs only bash, git and python3.
 set -u
+# The whole body lives in main() so bash parses the file completely before running it: editing the
+# skill while a `quorum wait` is in flight must not break the running process.
+main() {
 source "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/common.sh"
 source "$QR_SKILL_DIR/bin/lib/finalize.sh"
 source "$QR_SKILL_DIR/bin/lib/usage.sh"
@@ -393,4 +396,6 @@ case "${1:-}" in
   -h|--help|help|"") usage;;
   *) die "unknown command: $1 (quorum --help)";;
 esac
+}
+main "$@"
 exit $?
