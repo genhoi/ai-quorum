@@ -14,6 +14,9 @@ for f in "$Q" "$SK"/bin/lib/*.sh "$SK"/bin/backends/*.sh "$SK"/tests/*.sh; do ba
 python3 -m py_compile "$SK"/bin/lib/extract.py "$SK"/bin/lib/codex_context.py "$SK"/tests/unit_extract.py; pass "py_compile"
 if command -v shellcheck >/dev/null; then
   shellcheck -S warning -e SC1091,SC2086,SC2046,SC2155 "$Q" "$SK"/bin/lib/*.sh "$SK"/bin/backends/*.sh "$SK"/tests/*.sh; pass "shellcheck"
+elif command -v docker >/dev/null && docker image inspect koalaman/shellcheck:stable >/dev/null 2>&1; then   # a local image only, no pull
+  (cd "$SK" && docker run --rm -v "$SK:/mnt:ro" -w /mnt koalaman/shellcheck:stable -S warning -e SC1091,SC2086,SC2046,SC2155 \
+    bin/quorum bin/lib/*.sh bin/backends/*.sh tests/*.sh); pass "shellcheck (docker)"
 else echo "  - shellcheck not installed, skipped"; fi
 
 echo "== unit tests (extract.py)"
@@ -113,14 +116,14 @@ grep -q '^## Подтверждено (1)' "$RUN3/verdict.md" && grep -q '^## О
 ! grep -q 'Улика (read)' "$RUN3/refute-fake:b/prompt.md"; pass "refuter prompt carries claims only, not the advisors' reasoning"
 
 echo "== done stage: an advisor that fails at start is not an answer"
-RUN5="$("$Q" consult --brief "$TMP/q.md" --stage done --advisors fake:a,fake:fail --judge fake:x 2>/dev/null)"
+RUN5="$("$Q" consult --brief "$TMP/q.md" --stage "done" --advisors fake:a,fake:fail --judge fake:x 2>/dev/null)"
 for _ in 1 2 3 4 5 6; do "$Q" wait "$RUN5" --interval 1 --max 20 | grep -q "STATE: ready" && break; done
 case "$(cat "$RUN5/fake:fail/status")" in failed:1) ;; *) fail "fake:fail status: $(cat "$RUN5/fake:fail/status")";; esac; pass "an error exit without any work is failed, not done"
 ! grep -q '"refuter": "fake:fail"' "$RUN5/claims.json" && grep -q '"refuter": "fake:x"' "$RUN5/claims.json"; pass "a failed advisor gets no claims to refute"
 grep -A2 '^## Не ответили' "$RUN5/verdict.md" | grep -q 'fake:fail: failed:1 (exit 1; There is an issue'; pass "verdict lists the failed advisor with the reason"
 
 echo "== done stage with --no-refute"
-RUN6="$("$Q" consult --brief "$TMP/q.md" --stage done --advisors "fake:a, fake:b," --no-refute 2>"$TMP/err")"
+RUN6="$("$Q" consult --brief "$TMP/q.md" --stage "done" --advisors "fake:a, fake:b," --no-refute 2>"$TMP/err")"
 grep -q 'refuter off' "$TMP/err"; pass "consult warns that findings stay unverified"
 for _ in 1 2 3 4 5 6; do "$Q" wait "$RUN6" --interval 1 --max 20 | grep -q "STATE: ready" && break; done
 [ -z "$(ls -d "$RUN6"/refute-* 2>/dev/null)" ] && grep -q 'опровергатель выключен' "$RUN6/verdict.md"; pass "--no-refute is honoured at the acceptance"

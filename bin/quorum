@@ -170,9 +170,9 @@ cmd_consult() {
   py brief-check "$brief" "$pdir/brief.md" || exit 1
 
   # advisors and the judge as NAME[:VARIANT][=MODEL][@EFFORT]; $run/settings keeps "NAME MODEL EFFORT" per line
-  local raw=() specs=() a p nm list="" fams="" settings=""
-  IFS=, read -ra raw <<< "$advisors"
-  for a in "${raw[@]}"; do
+  local given=() specs=() a p nm list="" fams="" settings=""
+  IFS=, read -ra given <<< "$advisors"
+  for a in "${given[@]}"; do
     a="${a//[[:space:]]/}"; [ -n "$a" ] || continue   # "grok@xhigh, glm@max" and a trailing comma are fine
     p="$(spec_parse "$a")" || die "consult: cannot read advisor '$a' — NAME[=MODEL][@EFFORT], e.g. grok@xhigh, codex=gpt-6.1-sol@ultra"
     nm="${p%% *}"
