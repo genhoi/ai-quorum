@@ -5,7 +5,7 @@ SK="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 Q="$SK/bin/quorum"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export QUORUM_HOME="$TMP/state" QUORUM_CONFIG="$TMP/none.env" QUORUM_FAKE=1 FAKE_DELAY=0 QUORUM_WAIT_MAX=60
-unset CODEX_THREAD_ID CODEX_MODEL CODEX_EFFORT QR_CODEX_PARENT_ERROR
+unset CODEX_THREAD_ID CODEX_MODEL CODEX_EFFORT QR_CODEX_PARENT_ERROR QR_HARNESS CODEX_SANDBOX QUORUM_ORCHESTRATOR   # also when run inside a quorum job
 pass() { echo "  ✓ $*"; }
 fail() { echo "  ✗ $*" >&2; exit 1; }
 
