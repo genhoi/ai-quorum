@@ -6,9 +6,10 @@
     extract.py progress FORMAT RAW          # one progress line for `quorum status`
     extract.py error    META_JSON           # first error message from a job's meta.json
     extract.py profile  ROOT [--source]     # project section "## Quorum" / "## Совет" from AGENTS.md or CLAUDE.md
+    extract.py brief-check BRIEF TEMPLATE   # exit 1 when the brief is still the template
     extract.py letters  RUN                 # assign A/B/C to finished advisors (letters.json), print the mapping
     extract.py judge-prompt RUN ROUND TEMPLATE   # judge prompt: template + question + anonymized answers
-    extract.py judge-choice REPORT_MD       # JSON {"choice": "A"|"none", "feedback": {...}}
+    extract.py judge-choice REPORT_MD       # JSON {"choice": "A"|"own"|"none", "feedback": {...}}
     extract.py claims   RUN                 # done stage: findings of all advisors → claims.json (deduplicated, refuter assigned)
     extract.py refute-prompt RUN JOB TEMPLATE    # refuter prompt for one refuter job
     extract.py verdict  RUN                 # verdict.md to stdout
@@ -366,6 +367,22 @@ def project_profile(root):
     return None, ""
 
 
+def brief_check(brief, template):
+    """(error, warning). A brief with nothing but the template's headings, comments and placeholder
+    lines is an error: the council would answer an empty question. An empty «Вопрос» is a warning."""
+    def lines(text):
+        text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+        text = re.sub(r"(?ms)^## Профиль проекта.*?(?=^## |\Z)", "", text)
+        return [l.strip() for l in text.splitlines() if l.strip()]
+    text = _read(brief)
+    placeholders = set(lines(_read(template)))
+    if not [l for l in lines(text) if not l.startswith("#") and l not in placeholders]:
+        return "the brief is still the template (only headings and comments); fill in Задача, Вопрос, Как проверять", ""
+    if not section(re.sub(r"<!--.*?-->", "", text, flags=re.S), "вопрос", "question"):
+        return "", "brief: the section «Вопрос» is empty — the judge and the verdict quote it"
+    return "", ""
+
+
 # ---------- judge ----------
 
 LETTERS = "ABCDEFGH"
@@ -407,10 +424,15 @@ def judge_prompt(run, round_no, template):
 def judge_choice(report_md):
     data = json_block(_read(report_md), "choice")
     choice = str(data.get("choice") or "none").strip().upper()
-    if choice not in list(LETTERS) + ["NONE"]:
+    if choice not in list(LETTERS) + ["NONE", "OWN"]:
         choice = "NONE"
-    return {"choice": "none" if choice == "NONE" else choice, "feedback": data.get("feedback") or {},
+    return {"choice": choice.lower() if choice in ("NONE", "OWN") else choice, "feedback": data.get("feedback") or {},
             "must_do": data.get("must_do") or []}
+
+
+def own_solution(report):
+    """The judge's own solution from its report: the «Своё решение» section, else the whole report."""
+    return section(report, "своё решение", "свое решение", "own solution") or report
 
 
 # ---------- claims (done stage) and refuters ----------
@@ -483,6 +505,8 @@ def refute_prompt(run, job, template):
     else:
         winner = _read(run / "winner").strip()
         ans = job_answer(run / winner) if winner else ""
+        if winner and _read(run / winner / "role").strip() == "judge":
+            ans = own_solution(ans)
         parts += ["# Решение на проверку", "", ans.strip(), "",
                   "Выпиши из решения утверждения о коде, от которых зависит его правильность: что уже есть, чего нет,",
                   "что делает указанная строка, что докажет предложенный тест. Не больше восьми, самые весомые первыми;",
@@ -550,13 +574,21 @@ def _k(n):
     return str(n)
 
 
+def job_settings(d):
+    """(model, effort) the job ran with, from the `effective` file launch.sh writes; None when unknown."""
+    parts = (_read(d / "effective").split() + ["-", "-"])[:2]
+    return tuple(None if p == "-" else p for p in parts)
+
+
 def jobs_table(run):
     out = ["| Роль | Модель | Статус | Время | Токены in / out | Стоимость |", "|---|---|---|---|---|---|"]
     for d in jobs(run):
         m = job_meta(d)
         st = job_status(d) + (f" ({_read(d / 'partial').strip()})" if (d / "partial").exists() else "")
         cost = f"${m['cost_usd']:.2f}" if isinstance(m.get("cost_usd"), (int, float)) else "—"
-        out.append(f"| {_read(d / 'role').strip()} | {_read(d / 'backend').strip()} | {st} | {_dur(m, d)} | {_k(m.get('tokens_in'))} / {_k(m.get('tokens_out'))} | {cost} |")
+        settings = " · ".join(p for p in job_settings(d) if p)
+        model = _read(d / "backend").strip() + (f" ({settings})" if settings else "")
+        out.append(f"| {_read(d / 'role').strip()} | {model} | {st} | {_dur(m, d)} | {_k(m.get('tokens_in'))} / {_k(m.get('tokens_out'))} | {cost} |")
     return out
 
 
@@ -568,8 +600,8 @@ def verdict(run):
     question = section(brief, "вопрос", "question") or "_(раздел «Вопрос» в брифе не заполнен)_"
     title = {"plan": "Совет до кода", "stuck": "Совет по сбою", "done": "Приёмка"}.get(stage, "Совет")
     out = [f"# {title} — {meta.get('project')} — {meta.get('started', '')[:16].replace('T', ' ')}", "",
-           f"Прогон: `{run}`  ", f"Этап: {stage} · советники: {', '.join(meta.get('advisors') or [])}"
-           + (f" · судья: {meta.get('judge')}" if stage != "done" else ""), "",
+           f"Прогон: `{run}`  ", f"Этап: {stage} · советники: {', '.join(meta.get('advisor_specs') or meta.get('advisors') or [])}"
+           + (f" · судья: {meta.get('judge_spec') or meta.get('judge')}" if stage != "done" else ""), "",
            "## Вопрос", "", question, ""]
     advisors = jobs(run, "advisor")
     done = [d for d in advisors if job_status(d) == "done"]
@@ -597,7 +629,8 @@ def verdict(run):
         out += ["", f"## Не проверено ({len(buckets['unverified'])}) — решает исполнитель", ""]
         for c, r in buckets["unverified"]:
             out.append(f"- [{c['severity']}] `{c.get('file') or '?'}:{c.get('line') or '?'}` — {c['claim']}  ")
-            out.append(f"  нашёл: {', '.join(c['by'])}; {('опровергатель ' + r['refuter'] + ': ' + str(r.get('evidence', ''))) if r else 'опровергатель не отвечал'}")
+            nobody = "опровергатель выключен (--no-refute)" if meta.get("refute") is False else "опровергатель не отвечал"
+            out.append(f"  нашёл: {', '.join(c['by'])}; {('опровергатель ' + r['refuter'] + ': ' + str(r.get('evidence', ''))) if r else nobody}")
         if not buckets["unverified"]:
             out.append("_нет_")
         out += ["", "## Вердикты советников", ""]
@@ -609,9 +642,12 @@ def verdict(run):
         rounds = [d for d in jobs(run, "judge") if job_status(d) == "done"]
         last = rounds[-1] if rounds else None
         choice = judge_choice(last / "report.md") if last else {"choice": "none"}
-        winner = mapping.get(choice["choice"]) if choice["choice"] != "none" else None
+        winner = mapping.get(choice["choice"])
         out += ["## Кто есть кто", "", ", ".join(f"{k} = {v}" for k, v in mapping.items()) or "_советники не ответили_", ""]
-        if winner:
+        if choice["choice"] == "own":
+            out += [f"## Выбор судьи: своё решение (судья {_read(last / 'backend').strip()})", "",
+                    "_Судья счёл своё решение лучше всех предложенных; оно в разделе «Своё решение» его ответа ниже._", ""]
+        elif winner:
             out += [f"## Выбор судьи: {choice['choice']} = {winner}", ""]
         elif last:
             out += ["## Судья: приемлемого решения нет", ""]
@@ -664,8 +700,9 @@ def run_summary(run):
     out = {"stage": meta.get("stage"), "jobs": {}}
     for d in jobs(run):
         m = job_meta(d)
+        model, effort = job_settings(d)
         out["jobs"][d.name] = {"role": _read(d / "role").strip(), "backend": _read(d / "backend").strip(),
-                               "status": job_status(d), "partial": _read(d / "partial").strip() or None,
+                               "model": model, "effort": effort, "status": job_status(d), "partial": _read(d / "partial").strip() or None,
                                "duration_ms": _dur_ms(m, d), "tool_calls": m.get("tool_calls"),
                                "tokens_in": m.get("tokens_in"), "tokens_out": m.get("tokens_out"), "cost_usd": m.get("cost_usd")}
     if meta.get("stage") == "done":
@@ -680,7 +717,8 @@ def run_summary(run):
         rounds = [d for d in jobs(run, "judge") if job_status(d) == "done"]
         ch = judge_choice(rounds[-1] / "report.md") if rounds else {"choice": "none"}
         out["rounds"] = len(rounds)
-        out["winner"] = mapping.get(ch["choice"]) if ch["choice"] != "none" else None
+        out["judge_own"] = ch["choice"] == "own"
+        out["winner"] = f"judge:{_read(rounds[-1] / 'backend').strip()}" if out["judge_own"] else mapping.get(ch["choice"])
         out["must_do"] = len(ch.get("must_do") or [])
         concepts = {}
         for d in jobs(run, "advisor"):
@@ -695,6 +733,14 @@ def run_summary(run):
                                     "refuted": sum(1 for r in res if str(r.get("verdict")).lower() == "refuted")}
     out["cost_usd"] = round(sum((j.get("cost_usd") or 0) for j in out["jobs"].values()), 2)
     return out
+
+
+def _answered(job):
+    """A job from a run summary answered. Older journal records mark as done a CLI that failed at
+    start and printed its error: an error exit with no tool call and no output token is not an answer."""
+    if job.get("status") != "done":
+        return False
+    return not (job.get("partial") and not job.get("tool_calls") and not job.get("tokens_out"))
 
 
 def digest(home, since=None):
@@ -734,19 +780,24 @@ def digest(home, since=None):
         out.append(f"- проекты: {', '.join(sorted(p for p in projects if p))}")
     plan = [r for r in verdict_like if r.get("stage") in ("plan", "stuck")]
     if plan:
-        winners, rounds2, none, nothing = {}, 0, 0, 0
+        winners, rounds2, none, unjudged, nothing = {}, 0, 0, 0, 0
+        own = sum(1 for r in plan if r.get("judge_own"))
         for r in plan:
             w = r.get("winner")
             if w:
                 winners[w] = winners.get(w, 0) + 1
-            else:
+            elif r.get("rounds"):
                 none += 1
+            else:
+                unjudged += 1           # fewer than two answers, or the judge did not answer
             if (r.get("rounds") or 0) > 1:
                 rounds2 += 1
             nothing += sum(1 for p in (r.get("proposals") or {}).values() if p.get("nothing_needed"))
         out += ["", "## Советы (plan, stuck)", "",
                 f"- побеждали: {', '.join(f'{k} ×{v}' for k, v in sorted(winners.items(), key=lambda x: -x[1])) or '—'}",
-                f"- без приемлемого решения: {none} · понадобился второй круг: {rounds2}",
+                f"- без приемлемого решения: {none} · без суда (меньше двух ответов или судья не ответил): {unjudged}"
+                f" · понадобился второй круг: {rounds2}",
+                f"- судья предложил своё решение: {own}",
                 f"- ответов «делать ничего не нужно»: {nothing}",
                 f"- средняя стоимость совета: ${sum(r.get('cost_usd') or 0 for r in plan) / len(plan):.2f}"]
     done = [r for r in verdict_like if r.get("stage") == "done"]
@@ -763,7 +814,7 @@ def digest(home, since=None):
             key = f"{j.get('backend')} ({j.get('role')})"
             st = stats.setdefault(key, {"n": 0, "done": 0, "dur": [], "cost": []})
             st["n"] += 1
-            st["done"] += 1 if j.get("status") == "done" else 0
+            st["done"] += 1 if _answered(j) else 0
             if isinstance(j.get("duration_ms"), (int, float)):
                 st["dur"].append(j["duration_ms"])
             if isinstance(j.get("cost_usd"), (int, float)):
@@ -804,6 +855,13 @@ def main(argv):
         print(f"{len(p.tools)} tool calls; last: {last}; text: {snippet}{err}{cost}")
     elif cmd == "error":
         print(first_error(rest[0]))
+    elif cmd == "brief-check":
+        err, warning = brief_check(rest[0], rest[1])
+        if warning:
+            print(f"quorum: {warning}", file=sys.stderr)
+        if err:
+            print(f"quorum: consult: {err}: {rest[0]}", file=sys.stderr)
+            sys.exit(1)
     elif cmd == "profile":
         src, text = project_profile(rest[0])
         if not src:

@@ -8,6 +8,30 @@ QR_RUNS="$QR_HOME/runs"
 QR_CFG="$QR_HOME/cfg"          # isolated CLAUDE_CONFIG_DIR per third-party backend (glm, kimi)
 QR_DEFAULT_LINKS="vendor node_modules .venv .env .env.local .env.test"
 QR_ALL_BACKENDS="codex grok glm kimi kimi-cli opus fable"
+
+# The orchestrator that called quorum, for the usage journal. Read before defaults.sh: it exports
+# CODEX_MODEL, GROK_MODEL and KIMI_MODEL, and after that every caller would look like Codex.
+# Environment first, then the first known agent CLI up the process tree.
+detect_harness() {
+  if [ -n "${QUORUM_ORCHESTRATOR:-}" ]; then printf '%s' "$QUORUM_ORCHESTRATOR"; return; fi
+  if [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ]; then
+    case "${ANTHROPIC_BASE_URL:-}" in
+      *z.ai*) printf 'claude-code(glm)';; *kimi*) printf 'claude-code(kimi)';; "") printf 'claude-code';; *) printf 'claude-code(other)';;
+    esac; return
+  fi
+  if env | grep -qE '^ZCODE_'; then printf 'zcode'; return; fi
+  if [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_SANDBOX:-}" ]; then printf 'codex'; return; fi
+  local pid="$PPID" comm i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    comm="$(ps -o comm= -p "$pid" 2>/dev/null)" || break
+    case "$comm" in zcode*) printf 'zcode'; return;; codex*) printf 'codex'; return;; grok*) printf 'grok'; return;; kimi*) printf 'kimi'; return;; esac
+    pid="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')"; [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+  done
+  printf 'shell'
+}
+[ -n "${QR_HARNESS:-}" ] || QR_HARNESS="$(detect_harness)"
+export QR_HARNESS
+
 source "$QR_SKILL_DIR/bin/lib/defaults.sh"
 
 die()  { printf 'quorum: %s\n' "$*" >&2; exit 1; }
@@ -15,8 +39,44 @@ warn() { printf 'quorum: %s\n' "$*" >&2; }
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 py() { python3 "$QR_SKILL_DIR/bin/lib/extract.py" "$@"; }
 
+# Both are called inside $(...), where `die` leaves only the subshell: callers check the status.
 proj_root() { git rev-parse --show-toplevel 2>/dev/null || die "not a git repository: $PWD (git is required for the snapshot)"; }
-proj_name() { basename "$(proj_root)"; }
+proj_name() { local r; r="$(proj_root)" || return 1; basename "$r"; }
+
+# Advisor or judge spec: NAME[:VARIANT][=MODEL][@EFFORT] — grok@xhigh, codex=gpt-6.1-sol@ultra, fake:a.
+# Prints "NAME MODEL EFFORT" with "-" for a part that is not given; returns 1 on a malformed spec.
+spec_parse() { # spec_parse SPEC
+  local s="$1" model="-" effort="-"
+  case "$s" in *@*) effort="${s##*@}"; s="${s%@*}";; esac
+  case "$s" in *=*) model="${s#*=}"; s="${s%%=*}";; esac
+  [[ "$s" =~ ^[a-z][a-z0-9-]*(:[A-Za-z0-9_-]+)?$ ]] && [[ "$effort" =~ ^[a-z-]+$ ]] && [[ "$model" =~ ^[^[:space:]@=]+$ ]] || return 1
+  printf '%s %s %s\n' "$s" "$model" "$effort"
+}
+
+# Model and effort of one job → the variables its backend reads. Empty = the default stays.
+# codex and grok take effort from CODEX_EFFORT / GROK_EFFORT, the claude family from QR_EFFORT,
+# kimi-cli has no effort flag.
+apply_job_settings() { # apply_job_settings BACKEND MODEL EFFORT
+  local m="$2" e="$3"
+  case "${1%%:*}" in
+    codex)    CODEX_MODEL="${m:-$CODEX_MODEL}"; CODEX_EFFORT="${e:-$CODEX_EFFORT}" ;;
+    grok)     GROK_MODEL="${m:-$GROK_MODEL}"; GROK_EFFORT="${e:-$GROK_EFFORT}" ;;
+    kimi-cli) KIMI_CLI_MODEL="${m:-$KIMI_CLI_MODEL}" ;;
+    glm)      GLM_MODEL="${m:-$GLM_MODEL}" ;;
+    kimi)     KIMI_MODEL="${m:-$KIMI_MODEL}" ;;
+    opus)     OPUS_MODEL="${m:-$OPUS_MODEL}" ;;
+    fable)    FABLE_MODEL="${m:-$FABLE_MODEL}" ;;
+  esac
+  case "${1%%:*}" in codex|grok|kimi-cli) ;; *) QR_EFFORT="${e:-${QR_EFFORT:-max}}" ;; esac
+  export CODEX_MODEL CODEX_EFFORT GROK_MODEL GROK_EFFORT KIMI_CLI_MODEL GLM_MODEL KIMI_MODEL OPUS_MODEL FABLE_MODEL QR_EFFORT
+}
+effective_settings() { # effective_settings BACKEND — "MODEL EFFORT" the job runs with, after apply_job_settings
+  case "${1%%:*}" in
+    codex) echo "$CODEX_MODEL $CODEX_EFFORT";; grok) echo "$GROK_MODEL $GROK_EFFORT";; kimi-cli) echo "$KIMI_CLI_MODEL -";;
+    glm) echo "$GLM_MODEL $QR_EFFORT";; kimi) echo "$KIMI_MODEL $QR_EFFORT";; opus) echo "$OPUS_MODEL $QR_EFFORT";;
+    fable) echo "$FABLE_MODEL $QR_EFFORT";; *) echo "- $QR_EFFORT";;
+  esac
+}
 
 # Model family of a backend: the judge and the refuter must come from a family other than the
 # advisor they check. "name:variant" is allowed (fake:a, fake:b — the same backend twice).
@@ -43,7 +103,7 @@ resolve_run() { # resolve_run [RUN]
     [ -d "$QR_RUNS/$r" ] && { printf '%s' "$QR_RUNS/$r"; return; }
     die "run not found: $r"
   fi
-  local p; p="$(proj_name)"
+  local p; p="$(proj_name)" || exit 1
   local latest; latest="$(ls -1d "$QR_RUNS/$p"-* 2>/dev/null | sort | tail -n1)"
   [ -n "$latest" ] || die "no runs for project $p (see: quorum runs)"
   printf '%s' "$latest"

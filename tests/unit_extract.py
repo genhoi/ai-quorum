@@ -32,6 +32,24 @@ class ParsersTest(unittest.TestCase):
         self.assertEqual(extract.section(text, "вопрос"), "один\nдва")
         self.assertEqual(extract.section(text, "нет"), "")
 
+    def test_judge_own_choice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = Path(tmp) / "report.md"
+            r.write_text("## Своё решение\nсвоё\n\n## Обязательно сделать\n- x\n```json\n{\"choice\": \"Own\"}\n```\n", encoding="utf-8")
+            self.assertEqual(extract.judge_choice(r)["choice"], "own")
+            self.assertEqual(extract.own_solution(r.read_text(encoding="utf-8")), "своё")
+
+    def test_brief_check(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tpl = Path(tmp) / "tpl.md"
+            tpl.write_text("# Вводная\n<!-- заполни -->\n## Задача\n<!-- что -->\n## Вопрос\n- Тесты: `...`\n", encoding="utf-8")
+            brief = Path(tmp) / "b.md"
+            brief.write_text(tpl.read_text(encoding="utf-8") + "\n## Профиль проекта (из CLAUDE.md)\n- make test\n", encoding="utf-8")
+            self.assertTrue(extract.brief_check(brief, tpl)[0])          # template + profile only
+            brief.write_text("## Задача\nсделать x\n## Вопрос\n", encoding="utf-8")
+            self.assertEqual(extract.brief_check(brief, tpl)[0], "")
+            self.assertTrue(extract.brief_check(brief, tpl)[1])          # empty «Вопрос» is a warning
+
     def test_family(self):
         self.assertEqual(extract.family_of("fake:b"), "fake-b")
         self.assertEqual(extract.family_of("kimi-cli"), "moonshot")

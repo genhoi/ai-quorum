@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Stub backend for CI and dry runs: answers according to the role in the prompt, no network.
 # Never selected automatically (check fails unless QUORUM_FAKE=1). Variants fake:a, fake:b, fake:c
-# count as different families, so a run can be exercised with the stub alone.
+# count as different families, so a run can be exercised with the stub alone; fake:fail exits
+# with an error before doing any work, like a CLI given an unknown model.
 # The answer texts live in tests/samples/fake-*.md; the role is read from $QR_DIR/role.
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/common.sh"
 emit() { # emit FILE — wrap a markdown answer into a minimal claude stream-json log
@@ -22,6 +23,12 @@ case "$1" in
     stage="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("stage","plan"))' "$QR_RUN/meta.json" 2>/dev/null || echo plan)"
     backend="$(cat "$QR_DIR/backend" 2>/dev/null || echo fake)"
     variant="${QR_FAKE_VARIANT:-${backend#*:}}"; [ "$variant" != "$backend" ] || variant=a
+    if [ "$variant" = fail ]; then   # a CLI that fails at start (unknown model): error text, exit 1, no work
+      python3 -c 'import json; e="There is an issue with the selected model (stub-x). It may not exist."
+print(json.dumps({"type": "assistant", "message": {"role": "assistant", "model": "<synthetic>", "content": [{"type": "text", "text": e}]}}))
+print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "result": e, "num_turns": 1, "usage": {"input_tokens": 0, "output_tokens": 0}}))'
+      exit 1
+    fi
     s="$QR_SKILL_DIR/tests/samples"
     for f in "$s/fake-$role-$stage-$variant.md" "$s/fake-$role-$stage.md" "$s/fake-$role-$variant.md" "$s/fake-$role.md"; do [ -f "$f" ] && break; done
     [ -f "$f" ] || die "fake: no sample for role $role"

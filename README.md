@@ -7,7 +7,8 @@
 A skill for coding agents (Claude Code, Codex, Kimi, Grok). At three points of a task the
 implementer asks several models from different families for advice. The models answer
 independently in disposable snapshots of the repository, where they can read the code and run
-the tests. A judge from yet another family picks the simplest correct answer by explicit criteria.
+the tests. A judge from yet another family picks the simplest correct answer by explicit criteria, or
+proposes its own when it knows a better one than every proposal.
 A refuter must disprove every claim with evidence from the code or a test; only what survives
 reaches the implementer.
 
@@ -30,27 +31,29 @@ The implementer consults at three points and no more often:
 
 A single consultation without implementation: "ask codex, grok, glm: store the status in a
 column or in a separate table". The judge: "judge opus" or `quorum config set QUORUM_JUDGE opus`.
+Model and reasoning effort are set per advisor and for the judge:
+`--advisors grok@xhigh,codex=gpt-6.1-sol@max --judge fable@high`.
 
 ```bash
-quorum brief --out /tmp/q.md            # brief template; fill it in
-quorum consult --brief /tmp/q.md        # --stage plan|stuck|done, --advisors, --judge, --plan FILE
-quorum wait RUN --max 110               # the run advances by itself; first line: STATE: ready | STATE: running (call again)
+quorum brief > /tmp/q.md               # brief template; fill it in (consult refuses an unfilled one)
+quorum consult --brief /tmp/q.md        # --stage plan|stuck|done, --advisors NAME[=MODEL][@EFFORT],…, --judge, --plan FILE
+quorum wait RUN --max 110               # the run advances by itself; first line is exactly STATE: ready or STATE: running (call again)
 cat RUN/verdict.md
 quorum feedback RUN "what helped, what was accepted, what was rejected"   # refused before the verdict
-quorum clean RUN
+quorum clean RUN                        # --force stops a running run
 ```
 
 ## What the verdict holds
 
 Before code and when stuck: who is who (the judge's letters and the models), the judge's choice
-with a table by criteria, "must do", "do not take", the refuter's check of the chosen solution,
+(an advisor's letter or the judge's own solution) with a table by criteria, "must do", "do not take", the refuter's check of the chosen solution,
 the advisors' answers. At acceptance: confirmed (fix), refuted (do not fix, can be brought back
 by hand), unverified (the implementer decides), the advisors' verdicts.
 
 ## Cost
 
 Codex, Grok, GLM and Kimi run on subscriptions. The judge (Claude Fable) reads three short
-answers: about a dollar per call. A consultation before code: 15–40 minutes, three subscription
+answers: about a dollar per call. A consultation before code: 15–60 minutes, three subscription
 runs and one judge call.
 
 ## Setup

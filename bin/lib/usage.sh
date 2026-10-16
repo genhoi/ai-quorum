@@ -3,19 +3,8 @@
 # only what a retrospective needs: stages, roles, outcomes, durations, cost. Disable with
 # QUORUM_NO_USAGE=1. Read back with `quorum digest [--since DATE]`.
 
-# Best-effort guess of the orchestrator harness (override with QUORUM_ORCHESTRATOR).
-usage_harness() {
-  if [ -n "${QUORUM_ORCHESTRATOR:-}" ]; then printf '%s' "$QUORUM_ORCHESTRATOR"; return; fi
-  if [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ]; then
-    case "${ANTHROPIC_BASE_URL:-}" in
-      *z.ai*) printf 'claude-code(glm)';; *kimi*) printf 'claude-code(kimi)';; "") printf 'claude-code';; *) printf 'claude-code(other)';;
-    esac; return
-  fi
-  if env | grep -qE '^CODEX_'; then printf 'codex'; return; fi
-  if env | grep -qE '^KIMI_'; then printf 'kimi'; return; fi
-  if env | grep -qE '^GROK_'; then printf 'grok'; return; fi
-  printf 'shell'
-}
+# The orchestrator harness, detected once in common.sh (override with QUORUM_ORCHESTRATOR).
+usage_harness() { printf '%s' "$QR_HARNESS"; }
 
 usage_log() { # usage_log EVENT [key=value ...]   (values are strings; key=@FILE reads JSON from FILE)
   [ -z "${QUORUM_NO_USAGE:-}" ] || return 0

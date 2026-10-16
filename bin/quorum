@@ -21,16 +21,18 @@ quorum — a council of models: independent answers, a judge, a refuter
   quorum consult --brief FILE [options] start the council in the background; prints the run path
       --stage plan|stuck|done           plan: one solution each + judge (default); stuck: diagnose a failure + judge;
                                         done: acceptance — checks, blocking findings only, refuter
-      --advisors NAME[,NAME]            default QUORUM_ADVISORS (codex,grok,glm); "name:variant" runs one backend twice
-      --judge NAME                      default QUORUM_JUDGE (fable); not used at stage done
+      --advisors SPEC[,SPEC]            default QUORUM_ADVISORS (codex,grok,glm); SPEC = NAME[:VARIANT][=MODEL][@EFFORT]:
+                                        grok@xhigh, glm@max, codex=gpt-6.1-sol@ultra; "name:variant" runs one backend twice
+      --judge SPEC                      default QUORUM_JUDGE (fable), e.g. fable@high; at stage done only a spare refuter
       --plan FILE                       document (plan, design) put into the snapshot and the prompt
       --base REF                        stage done: diff base (default: merge-base with main/master)
-      --refute | --no-refute            refuter after the verdict (default: on for plan and done, off for stuck)
+      --refute | --no-refute            refuter after the verdict (default: on for plan and done, off for stuck;
+                                        without it every finding at stage done stays unverified)
       --timeout SEC                     per advisor / refuter (default QUORUM_TIMEOUT)
       --deps copy|hardlink|symlink|none how ignored dependencies get into snapshots (default QUORUM_DEPS)
       --link PATH                       extra dependency path (repeatable)
-  quorum wait [RUN] [--max SEC]         wait up to SEC for the verdict; first line "STATE: ready" or "STATE: running"
-                                        (exit code is 0 in both cases; call again while running)
+  quorum wait [RUN] [--max SEC]         wait up to SEC for the verdict; the first line is exactly "STATE: ready"
+                                        or "STATE: running" (exit code is 0 in both cases; call again while running)
   quorum status [RUN]                   jobs and progress
   quorum advance [RUN]                  one step of the state machine (runs by itself when a job ends; wait repeats it)
   quorum ask RUN JOB "question"         continue an advisor's session (a focused follow-up); prints the answer
@@ -38,7 +40,8 @@ quorum — a council of models: independent answers, a judge, a refuter
   quorum digest [--since DATE]          usage journal + notes as Markdown (for a retrospective)
   quorum logs RUN JOB                   stderr tail and progress of one job
   quorum runs                           runs of the current project
-  quorum clean [RUN|--all] [--force]    remove worktrees and the run directory (refuses while jobs run unless --force)
+  quorum clean [RUN|--all] [--force]    remove worktrees and the run directory (refuses while jobs run;
+                                        --force stops them first — the way to cancel a run)
 USAGE
 }
 
@@ -82,7 +85,8 @@ append_profile() { # append_profile ROOT FILE — add the project profile sectio
 cmd_brief() {
   local out=""
   while [ $# -gt 0 ]; do case "$1" in --out) out="$2"; shift 2;; *) die "brief: unknown option $1";; esac; done
-  local tmp; tmp="$(mktemp)"; cp "$(lang_dir)/brief.md" "$tmp"
+  local pdir; pdir="$(lang_dir)" || exit 1
+  local tmp; tmp="$(mktemp)"; cp "$pdir/brief.md" "$tmp"
   local root; root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   local from=""; [ -z "$root" ] || from="$(append_profile "$root" "$tmp" || true)"
   [ -z "$from" ] || warn "project profile appended from $from"
@@ -119,6 +123,15 @@ new_job() {
   local d="$run/$name"; mkdir -p "$d"
   bash "$QR_SKILL_DIR/bin/backends/${backend%%:*}.sh" format > "$d/format" 2>/dev/null || { warn "no backend $backend — skipping $name"; rm -rf "$d"; return 1; }
   echo "$backend" > "$d/backend"; echo "$role" > "$d/role"; echo "$mode" > "$d/mode"; echo "$timeout" > "$d/timeout"
+  # model and effort from the spec: the judge's line for the judge, the advisor's line for its retry
+  # and for a refuter of that backend, the judge's line for the judge acting as a spare refuter
+  local key="$backend" s; [ "$role" != judge ] || key=judge
+  s="$(awk -v k="$key" '$1 == k { print $2, $3; exit }' "$run/settings" 2>/dev/null)"
+  [ -n "$s" ] || [ "$backend" != "$(cat "$run/judge" 2>/dev/null)" ] || s="$(awk '$1 == "judge" { print $2, $3; exit }' "$run/settings" 2>/dev/null)"
+  if [ -n "$s" ]; then
+    [ "${s%% *}" = - ] || echo "${s%% *}" > "$d/model"
+    [ "${s#* }" = - ] || echo "${s#* }" > "$d/effort"
+  fi
   cp "$prompt" "$d/prompt.md"
   local root; root="$(cat "$run/project_root")"
   case "$snap" in
@@ -152,32 +165,46 @@ cmd_consult() {
   case "$deps" in copy|hardlink|symlink|none) ;; *) die "consult: --deps copy|hardlink|symlink|none";; esac
   [ -z "$plan" ] || [ -f "$plan" ] || die "consult: plan file not found: $plan"
   if [ -z "$refute" ]; then case "$stage" in stuck) refute=0;; *) refute=1;; esac; fi
-  [ "$stage" != "done" ] || refute=1
-  local pdir; pdir="$(lang_dir)"
-  local list="${advisors//,/ }" a fams=""
-  for a in $list; do
-    bash "$QR_SKILL_DIR/bin/backends/${a%%:*}.sh" format >/dev/null 2>&1 || die "consult: unknown backend $a"
-    fams="$fams $(family_of "$a")"
+  [ "$stage" != "done" ] || [ "$refute" = 1 ] || warn "refuter off (--no-refute): every finding of the acceptance will be listed as unverified"
+  local pdir; pdir="$(lang_dir)" || exit 1
+  py brief-check "$brief" "$pdir/brief.md" || exit 1
+
+  # advisors and the judge as NAME[:VARIANT][=MODEL][@EFFORT]; $run/settings keeps "NAME MODEL EFFORT" per line
+  local raw=() specs=() a p nm list="" fams="" settings=""
+  IFS=, read -ra raw <<< "$advisors"
+  for a in "${raw[@]}"; do
+    a="${a//[[:space:]]/}"; [ -n "$a" ] || continue   # "grok@xhigh, glm@max" and a trailing comma are fine
+    p="$(spec_parse "$a")" || die "consult: cannot read advisor '$a' — NAME[=MODEL][@EFFORT], e.g. grok@xhigh, codex=gpt-6.1-sol@ultra"
+    nm="${p%% *}"
+    bash "$QR_SKILL_DIR/bin/backends/${nm%%:*}.sh" format >/dev/null 2>&1 || die "consult: unknown backend '${nm%%:*}' in '$a' (known: $QR_ALL_BACKENDS)"
+    case " $list " in *" $nm "*) die "consult: $nm is listed twice; give each its own variant, e.g. $nm:a@high,$nm:b@max";; esac
+    [ "${nm%%:*}" != kimi-cli ] || [ "${p##* }" = - ] || warn "kimi-cli has no effort flag: @${p##* } is ignored (effort lives in ~/.kimi-code/config.toml)"
+    list="$list $nm"; fams="$fams $(family_of "$nm")"; settings="$settings$p"$'\n'; specs+=("$a")
   done
+  list="${list# }"; [ -n "$list" ] || die "consult: no advisors"
+  local judge_spec="$judge"
+  p="$(spec_parse "$judge")" || die "consult: cannot read judge '$judge' — NAME[=MODEL][@EFFORT], e.g. fable@high"
+  judge="${p%% *}"; settings="${settings}judge ${p#* }"$'\n'
   if [ "$stage" != "done" ]; then
     bash "$QR_SKILL_DIR/bin/backends/${judge%%:*}.sh" format >/dev/null 2>&1 || die "consult: unknown judge backend $judge"
     case " $fams " in *" $(family_of "$judge") "*) warn "judge $judge shares a model family with an advisor; its verdict on that advisor is less independent";; esac
   fi
 
+  # everything that can fail comes before the run directory exists: a refused consult leaves nothing behind
   local root name run snap_commit
-  root="$(proj_root)"; name="$(basename "$root")"
-  mkdir -p "$QR_RUNS"
-  run="$(mktemp -d "$QR_RUNS/$name-$(date +%Y%m%d-%H%M%S)-XXXX")"
-  echo "$root" > "$run/project_root"; echo "$timeout" > "$run/timeout"; echo "$deps" > "$run/deps"
-  echo "$judge" > "$run/judge"; echo "$refute" > "$run/refute"
-  printf '%s\n' $links $extra_links > "$run/links"
-  snap_commit="$(snapshot_commit "$root")"
+  root="$(proj_root)" || exit 1; name="$(basename "$root")"
+  snap_commit="$(snapshot_commit "$root")" || die "consult: cannot snapshot the working tree of $root"
   if [ "$stage" = "done" ]; then
-    base="$(detect_base "$root" "$base")" || die "consult: no base found (main/master); pass --base REF"
-    local mb; mb="$(git -C "$root" merge-base "$base" "$snap_commit")"
+    base="$(detect_base "$root" "$base")" || die "consult: no base for the acceptance diff (main/master not found or --base unknown); pass --base REF"
+    local mb; mb="$(git -C "$root" merge-base "$base" "$snap_commit")" || die "consult: $base and the working tree have no common history"
     [ "$mb" != "$snap_commit" ] || die "consult: no changes between $base and the working tree — nothing to accept"
     base="$mb"
   fi
+  mkdir -p "$QR_RUNS"
+  run="$(mktemp -d "$QR_RUNS/$name-$(date +%Y%m%d-%H%M%S)-XXXX")"
+  echo "$root" > "$run/project_root"; echo "$timeout" > "$run/timeout"; echo "$deps" > "$run/deps"
+  echo "$judge" > "$run/judge"; echo "$refute" > "$run/refute"; printf '%s' "$settings" > "$run/settings"
+  printf '%s\n' $links $extra_links > "$run/links"
   make_worktree "$root" "$snap_commit" "$run/_snapshot_ref" none
   write_header "$run" "$stage" "$base" "$snap_commit" "$root" "$(echo $links $extra_links)" "$deps"
   remove_worktree "$root" "$run/_snapshot_ref"
@@ -190,22 +217,24 @@ cmd_consult() {
     [ -z "$plan" ] || { echo "---"; echo; echo "# Документ (plan.md, лежит и в корне снапшота)"; echo; cat "$plan"; echo; }
   } > "$run/prompt.md"
 
-  python3 - "$run" "$name" "$stage" "$base" "$snap_commit" "$list" "$judge" "$refute" "$(usage_harness)" <<'PY'
+  local spec_list; spec_list="$(IFS=,; echo "${specs[*]}")"
+  python3 - "$run" "$name" "$stage" "$base" "$snap_commit" "$list" "$judge" "$refute" "$(usage_harness)" "$spec_list" "$judge_spec" <<'PY'
 import json, sys, datetime
-run, name, stage, base, snap, lst, judge, refute, harness = sys.argv[1:10]
+run, name, stage, base, snap, lst, judge, refute, harness, specs, judge_spec = sys.argv[1:12]
 json.dump({"project": name, "stage": stage, "base": base, "snapshot_commit": snap, "advisors": lst.split(),
-           "judge": judge if stage != "done" else None, "refute": refute == "1", "harness": harness,
+           "advisor_specs": specs.split(","), "judge": judge if stage != "done" else None,
+           "judge_spec": judge_spec if stage != "done" else None, "refute": refute == "1", "harness": harness,
            "started": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")},
           open(f"{run}/meta.json", "w"), ensure_ascii=False, indent=1)
 PY
   for a in $list; do new_job "$run" "$a" "$a" advisor run "$run/prompt.md" new "$timeout" "$QUORUM_ADVISOR_EFFORT" || true; done
   [ -n "$(run_jobs "$run" advisor)" ] || die "consult: no advisor could be started"
-  usage_log consult run="$(basename "$run")" stage="$stage" advisors="$(echo $list | tr ' ' ',')" judge="$judge" refute="$refute" \
+  usage_log consult run="$(basename "$run")" stage="$stage" advisors="$spec_list" judge="$judge_spec" refute="$refute" \
     profile="$(py profile "$root" --source 2>/dev/null || echo none)" plan="${plan:+1}"
   echo "$run"
   local dr; dr="$(deps_report "$root" $links $extra_links)"; [ -z "$dr" ] || echo "deps ($deps): $dr" >&2
-  echo "started advisors: $list$( [ "$stage" != "done" ] && echo " · judge: $judge")$( [ "$refute" = 1 ] && echo " · refuter: on")" >&2
-  echo "next: quorum wait $run --max 110   (repeat until exit 0, then read $run/verdict.md)" >&2
+  echo "started advisors: $spec_list$( [ "$stage" != "done" ] && echo " · judge: $judge_spec")$( [ "$refute" = 1 ] && echo " · refuter: on")" >&2
+  echo "next: quorum wait $run --max 110 — the first line is STATE: ready (then read $run/verdict.md) or STATE: running (call again)" >&2
 }
 
 reap_dead() { # a wrapper that vanished without a final status → finalize from what is on disk
@@ -222,7 +251,7 @@ done_jobs() { local j; for j in $(run_jobs "$1" "$2"); do [ "$(status_of "$1" "$
 elapsed() { local s e a b; s="$(cat "$1/started" 2>/dev/null)" || { echo "—"; return; }; e="$(cat "$1/finished" 2>/dev/null || now_iso)"; a=$(date -d "$s" +%s); b=$(date -d "$e" +%s); printf '%dm%02ds' $(( (b-a)/60 )) $(( (b-a)%60 )); }
 
 cmd_status() {
-  local run; run="$(resolve_run "${1:-}")"; reap_dead "$run"
+  local run; run="$(resolve_run "${1:-}")" || exit 1; reap_dead "$run"
   echo "run: $run ($(meta_get "$run" stage))"
   local j d st
   for j in $(run_jobs "$run"); do
@@ -245,18 +274,19 @@ write_verdict() { # verdict.md appears atomically: readers poll for the file and
 # Called by `wait`, by every job wrapper when its job ends (launch.sh) and by hand; the lock on the
 # run keeps two callers from launching the same role twice. Jobs are spawned with fd 9 closed.
 cmd_advance() {
-  local run; run="$(resolve_run "${1:-}")"
+  local run; run="$(resolve_run "${1:-}")" || exit 1
   exec 9>"$run/.advance.lock"; flock -w 600 9 || { echo "advance: the run is locked by another caller"; return 3; }
   reap_dead "$run"
   [ ! -f "$run/verdict.md" ] || { echo "$run/verdict.md"; return 0; }
   local busy; busy="$(busy_jobs "$run")"
   [ -z "$busy" ] || { echo "running: $busy"; return 3; }
-  local stage judge pdir timeout; stage="$(meta_get "$run" stage)"; judge="$(cat "$run/judge")"; pdir="$(lang_dir)"; timeout="$(cat "$run/timeout")"
+  local stage judge pdir timeout; stage="$(meta_get "$run" stage)"; judge="$(cat "$run/judge")"; pdir="$(lang_dir)" || exit 1; timeout="$(cat "$run/timeout")"
   local done_adv; done_adv="$(done_jobs "$run" advisor)"
   if [ "$stage" = "done" ]; then
     if [ ! -f "$run/claims.json" ]; then
       [ -n "$done_adv" ] || { write_verdict "$run"; return 0; }
       py claims "$run" > /dev/null
+      [ "$(cat "$run/refute")" = 1 ] || { write_verdict "$run"; return 0; }
       local refuters; refuters="$(python3 -c 'import json,sys; print(" ".join(sorted({c["refuter"] for c in json.load(open(sys.argv[1])) if c.get("refuter")})))' "$run/claims.json")"
       [ -n "$refuters" ] || { write_verdict "$run"; return 0; }
       local r tmp; tmp="$(mktemp)"
@@ -304,10 +334,16 @@ cmd_advance() {
       rm -f "$tmp"; usage_log judge run="$(basename "$run")" round=2; echo "launched judge-2 ($judge)"; return 3
     fi
   fi
-  if [ "$choice" != none ] && [ "$(cat "$run/refute")" = 1 ] && [ -z "$(run_jobs "$run" refuter)" ]; then
-    local winner; winner="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$run/letters.json" "$choice")"
-    echo "$winner" > "$run/winner"
-    local wf a r=""; wf="$(family_of "$winner")"
+  # the winner is an advisor's job directory, or judge-N when the judge proposed its own solution
+  local winner=""
+  case "$choice" in
+    none) ;;
+    own)  winner="judge-$rounds" ;;
+    *)    winner="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$run/letters.json" "$choice")" ;;
+  esac
+  [ -z "$winner" ] || echo "$winner" > "$run/winner"
+  if [ -n "$winner" ] && [ "$(cat "$run/refute")" = 1 ] && [ -z "$(run_jobs "$run" refuter)" ]; then
+    local wf a r=""; wf="$(family_of "$(cat "$run/$winner/backend")")"
     for a in $done_adv; do [ "$(family_of "$a")" != "$wf" ] && { r="$a"; break; }; done
     [ -n "$r" ] || { [ "$(family_of "$judge")" != "$wf" ] && r="$judge"; }
     if [ -n "$r" ]; then
@@ -317,21 +353,26 @@ cmd_advance() {
       rm -f "$tmp"
     else warn "no backend from another family to refute $winner — skipped"; fi
   fi
-  [ "$choice" = none ] || echo "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$run/letters.json" "$choice")" > "$run/winner"
   write_verdict "$run"; return 0
 }
 
 cmd_wait() {
   local run="" interval=15 max="${QUORUM_WAIT_MAX:-110}"
   while [ $# -gt 0 ]; do case "$1" in --interval) interval="$2"; shift 2;; --max) max="$2"; shift 2;; *) run="$1"; shift;; esac; done
-  run="$(resolve_run "$run")"
-  local t0; t0=$(date +%s)
+  run="$(resolve_run "$run")" || exit 1
+  # The first line is exactly "STATE: ready" or "STATE: running": callers compare it as a whole,
+  # so roles launched during the wait are reported below it, not before it.
+  local t0 launched=""; t0=$(date +%s)
   while :; do
     local out rc; out="$(cmd_advance "$run")"; rc=$?
-    if [ "$rc" -eq 0 ]; then echo "STATE: ready — $out"; cmd_status "$run"; return 0; fi
-    case "$out" in launched*) echo "$out";; esac
+    if [ "$rc" -eq 0 ]; then
+      echo "STATE: ready"; echo "verdict: $out"; printf '%s' "$launched"; cmd_status "$run"; return 0
+    fi
+    case "$out" in launched*) launched="$launched$out"$'\n';; esac
     if [ $(( $(date +%s) - t0 )) -ge "$max" ]; then
-      echo "STATE: running — not an error; verdict.md does not exist yet, do not read or clean the run; call again: quorum wait $run --max $max"; cmd_status "$run"; return 0
+      echo "STATE: running"
+      echo "not an error: verdict.md does not exist yet — do not read or clean the run; call again: quorum wait $run --max $max"
+      printf '%s' "$launched"; cmd_status "$run"; return 0
     fi
     sleep "$interval"
   done
@@ -339,21 +380,24 @@ cmd_wait() {
 
 cmd_ask() {
   [ $# -ge 3 ] || die "ask RUN JOB \"question\""
-  local run; run="$(resolve_run "$1")"; local j="$2"; shift 2; local msg="$*"
+  local run; run="$(resolve_run "$1")" || exit 1; local j="$2"; shift 2; local msg="$*"
   local d="$run/$j"; [ -d "$d" ] || die "no job $j in this run"
   export QR_RUN="$run" QR_JOB="$j" QR_DIR="$d" QR_SNAPSHOT="$d/snapshot" QR_PROMPT="$d/prompt.md"
   export QR_PROJ_ROOT="$(cat "$run/project_root")" QR_TIMEOUT="$(cat "$run/timeout")" QR_EFFORT="$QUORUM_ADVISOR_EFFORT"
+  [ "$(cat "$d/role" 2>/dev/null)" != judge ] || QR_EFFORT="$QUORUM_JUDGE_EFFORT"
+  local backend; backend="$(cat "$d/backend")"
+  # the follow-up runs with the model and effort the job was started with
+  apply_job_settings "$backend" "$(cat "$d/model" 2>/dev/null)" "$(cat "$d/effort" 2>/dev/null)"
   local n; n=$(ls "$d"/ask-*.md 2>/dev/null | wc -l); n=$((n+1))
   usage_log ask run="$(basename "$run")" job="$j" n="$n"
   local raw="$d/ask-$n.raw"
-  local backend; backend="$(cat "$d/backend")"
   timeout -k 30 "$QR_TIMEOUT" bash "$QR_SKILL_DIR/bin/backends/${backend%%:*}.sh" ask "$msg" > "$raw" 2>>"$d/stderr.log"
   { echo "## Вопрос"; echo; echo "$msg"; echo; echo "## Ответ ($j)"; echo; py report "$(cat "$d/format")" "$raw"; } | tee "$d/ask-$n.md"
 }
 
 cmd_feedback() {
   [ $# -ge 2 ] || die 'feedback RUN "note"'
-  local run; run="$(resolve_run "$1")"; shift; local text="$*"
+  local run; run="$(resolve_run "$1")" || exit 1; shift; local text="$*"
   [ -n "$text" ] || die "feedback: the note is empty"
   [ -f "$run/verdict.md" ] || die "feedback: no verdict yet ($run/verdict.md does not exist). A note is about what the verdict gave; run: quorum wait $run"
   printf '%s\n' "$text" > "$run/feedback.md"
@@ -370,8 +414,8 @@ PY
 }
 
 cmd_digest() { local since=""; [ "${1:-}" != "--since" ] || since="$2"; py digest "$QR_HOME" ${since:+--since "$since"}; }
-cmd_logs() { local run; run="$(resolve_run "$1")"; local d="$run/$2"; echo "--- stderr (tail) ---"; tail -n 30 "$d/stderr.log" 2>/dev/null; echo "--- progress ---"; py progress "$(cat "$d/format")" "$d/raw"; }
-cmd_runs() { ls -1d "$QR_RUNS/$(proj_name)"-* 2>/dev/null || echo "no runs"; }
+cmd_logs() { local run; run="$(resolve_run "$1")" || exit 1; local d="$run/$2"; echo "--- stderr (tail) ---"; tail -n 30 "$d/stderr.log" 2>/dev/null; echo "--- progress ---"; py progress "$(cat "$d/format")" "$d/raw"; }
+cmd_runs() { local p; p="$(proj_name)" || exit 1; ls -1d "$QR_RUNS/$p"-* 2>/dev/null || echo "no runs"; }
 
 # Files created by tests inside docker belong to root and survive rm: delete them through a container.
 rm_stubborn() { # rm_stubborn DIR
@@ -384,10 +428,10 @@ rm_stubborn() { # rm_stubborn DIR
 }
 
 cmd_clean() {
-  local root; root="$(proj_root)"; local targets=() force="" arg=""
+  local root; root="$(proj_root)" || exit 1; local targets=() force="" arg=""
   while [ $# -gt 0 ]; do case "$1" in --force) force=1; shift;; *) arg="$1"; shift;; esac; done
   if [ "$arg" = "--all" ]; then mapfile -t targets < <(ls -1d "$QR_RUNS/$(basename "$root")"-* 2>/dev/null)
-  else targets=("$(resolve_run "$arg")"); fi
+  else local one; one="$(resolve_run "$arg")" || exit 1; targets=("$one"); fi
   local run j
   for run in "${targets[@]}"; do
     reap_dead "$run"

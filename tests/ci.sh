@@ -32,8 +32,20 @@ printf '# fixture\n\n## Quorum\n\n- Тесты: `python3 -m pytest -q`\n' > CLAU
 grep -q 'Профиль проекта' "$TMP/brief.md"; pass "brief picks the project profile from CLAUDE.md"
 printf '## Задача\nОтклонять возврат на ноль.\n\n## Вопрос\nНужна ли проверка в refund()?\n' > "$TMP/q.md"
 
+echo "== refusals leave no run behind"
+no_runs() { [ -z "$(ls -A "$QUORUM_HOME/runs" 2>/dev/null)" ]; }
+"$Q" consult --brief "$TMP/brief.md" --advisors fake:a,fake:b > "$TMP/out" 2>&1 && fail "consult accepted the unfilled template"
+grep -q 'still the template' "$TMP/out" && no_runs; pass "consult refuses a brief that is still the template"
+(cd "$TMP" && "$Q" consult --brief "$TMP/q.md" --advisors fake:a,fake:b) > "$TMP/out" 2>&1 && fail "consult ran outside a git repository"
+grep -q 'not a git repository' "$TMP/out" && no_runs; pass "consult outside a git repository fails without a nameless run directory"
+"$Q" consult --brief "$TMP/q.md" --advisors 'fake:a@HIGH,fake:b' > "$TMP/out" 2>&1 && fail "bad effort accepted"; grep -q 'cannot read advisor' "$TMP/out"
+"$Q" consult --brief "$TMP/q.md" --advisors fake:a,fake:a@max > "$TMP/out" 2>&1 && fail "duplicate advisor accepted"; grep -q 'listed twice' "$TMP/out"
+"$Q" consult --brief "$TMP/q.md" --advisors nope@high,fake:a > "$TMP/out" 2>&1 && fail "unknown backend accepted"; grep -q "unknown backend 'nope'" "$TMP/out"
+no_runs; pass "malformed, duplicate and unknown advisor specs are refused"
+
 echo "== plan stage: three advisors, judge picks B, refuter checks the winner"
-RUN="$("$Q" consult --brief "$TMP/q.md" --advisors fake:a,fake:b,fake:c --judge fake:x 2>/dev/null)"
+RUN="$("$Q" consult --brief "$TMP/q.md" --advisors fake:a@high,fake:b=stub-b,fake:c --judge fake:x@low 2>"$TMP/err")"
+grep -q 'first line is STATE: ready' "$TMP/err" && ! grep -q 'exit 0' "$TMP/err"; pass "consult names the STATE line, not an exit code"
 [ -d "$RUN/fake:a/snapshot" ] && [ -f "$RUN/fake:a/snapshot/vendor/lib.txt" ]; pass "advisor snapshots with copied deps"
 grep -q 'Профиль проекта' "$RUN/prompt.md"; pass "advisor prompt carries the brief and the profile"
 "$Q" feedback "$RUN" "слишком рано" > "$TMP/out" 2>&1 && fail "feedback accepted before the verdict"; grep -q 'no verdict yet' "$TMP/out"; pass "feedback refuses a note before the verdict"
@@ -44,6 +56,10 @@ pass "the run reaches the verdict without anyone calling wait"
 WIN="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["B"])' "$RUN/letters.json")"   # the stub judge always picks B
 grep -q "^## Выбор судьи: B = $WIN" "$RUN/verdict.md"; pass "verdict names the winner (letters resolved)"
 REF="$(ls -d "$RUN"/refute-* | head -1)"; [ -n "$REF" ] && [ "$(cat "$REF/backend")" != "$WIN" ]; pass "refuter from another family checked the winner"
+[ "$(cat "$RUN/fake:a/effort")" = high ] && [ "$(cat "$RUN/fake:b/model")" = stub-b ] && [ ! -f "$RUN/fake:c/effort" ] \
+  && [ "$(cat "$RUN/fake:a/effective")" = "- high" ] && [ "$(cat "$RUN/judge-1/effort")" = low ]; pass "model and effort per advisor and for the judge"
+[ "$(cat "$REF/effort" 2>/dev/null)" = "$(cat "$RUN/$(cat "$REF/backend")/effort" 2>/dev/null)" ]; pass "the refuter runs with its advisor's settings"
+grep -q 'советники: fake:a@high, fake:b=stub-b, fake:c · судья: fake:x@low' "$RUN/verdict.md"; pass "verdict header shows the specs"
 grep -q 'confirmed' "$RUN/verdict.md"; pass "refuter results in the verdict"
 grep -q 'Решение [ABC]' "$RUN/judge-1/prompt.md" && ! grep -q 'fake:' "$RUN/judge-1/prompt.md"; pass "judge prompt is anonymized"
 python3 - "$RUN/summary.json" <<'PY'
@@ -59,11 +75,25 @@ grep -c '"project": "fixture"' "$QUORUM_HOME/usage.jsonl" > "$TMP/out"; [ "$(cat
 
 echo "== plan stage: judge finds nothing acceptable → one retry round → judge again"
 RUN2="$("$Q" consult --brief "$TMP/q.md" --advisors fake:a,fake:b --judge fake:none --no-refute 2>/dev/null)"
-for _ in 1 2 3 4 5 6 7 8; do "$Q" wait "$RUN2" --interval 1 --max 20 | grep -q "STATE: ready" && break; done
+for _ in 1 2 3 4 5 6 7 8; do "$Q" wait "$RUN2" --interval 1 --max 20 > "$TMP/w"; grep -q "STATE: ready" "$TMP/w" && break; done
+[ "$(head -1 "$TMP/w")" = "STATE: ready" ] && grep -q "^verdict: $RUN2/verdict.md" "$TMP/w"; pass "wait: the first line is exactly STATE: ready, the path below it"
 [ -d "$RUN2/retry-fake:a" ] && [ -d "$RUN2/judge-2" ]; pass "retry jobs and a second judge round"
 grep -qE 'нет улики|тест не назван' "$RUN2/retry-fake:a/prompt.md"; pass "retry message carries the judge's feedback for that letter"
 grep -q 'Повторный ответ' "$RUN2/judge-2/prompt.md"; pass "second judge round sees the retry answers"
 grep -q 'приемлемого решения нет' "$RUN2/verdict.md"; pass "verdict reports no acceptable solution"
+
+echo "== plan stage: the judge proposes its own solution"
+RUN8="$("$Q" consult --brief "$TMP/q.md" --advisors fake:a,fake:b --judge fake:own 2>/dev/null)"
+for _ in 1 2 3 4 5 6; do "$Q" wait "$RUN8" --interval 1 --max 20 | grep -q "STATE: ready" && break; done
+grep -q '^## Выбор судьи: своё решение (судья fake:own)' "$RUN8/verdict.md"; pass "verdict shows the judge's own solution as the choice"
+REF8="$(ls -d "$RUN8"/refute-* | head -1)"; [ "$(cat "$RUN8/winner")" = judge-1 ] && [ -n "$REF8" ]; pass "the judge's own solution goes to a refuter from another family"
+grep -q 'в существующей границе' "$REF8/prompt.md" && ! grep -q '^## Оценка' "$REF8/prompt.md"; pass "the refuter gets the own solution, not the judge's comparison"
+python3 - "$RUN8/summary.json" <<'PY'
+import json, sys
+s = json.load(open(sys.argv[1]))
+assert s["judge_own"] is True and s["winner"] == "judge:fake:own", s
+PY
+pass "summary marks the judge's own solution"
 
 echo "== done stage: findings → claims → refuters from other families"
 echo "    return p.amount - amount - 1" >> billing/refunds.py   # uncommitted change to accept
@@ -82,13 +112,39 @@ pass "claims deduplicated and assigned to a refuter from another family"
 grep -q '^## Подтверждено (1)' "$RUN3/verdict.md" && grep -q '^## Опровергнуто (1)' "$RUN3/verdict.md" && grep -q '^## Не проверено (1)' "$RUN3/verdict.md"; pass "verdict buckets confirmed / refuted / unverified"
 ! grep -q 'Улика (read)' "$RUN3/refute-fake:b/prompt.md"; pass "refuter prompt carries claims only, not the advisors' reasoning"
 
+echo "== done stage: an advisor that fails at start is not an answer"
+RUN5="$("$Q" consult --brief "$TMP/q.md" --stage done --advisors fake:a,fake:fail --judge fake:x 2>/dev/null)"
+for _ in 1 2 3 4 5 6; do "$Q" wait "$RUN5" --interval 1 --max 20 | grep -q "STATE: ready" && break; done
+case "$(cat "$RUN5/fake:fail/status")" in failed:1) ;; *) fail "fake:fail status: $(cat "$RUN5/fake:fail/status")";; esac; pass "an error exit without any work is failed, not done"
+! grep -q '"refuter": "fake:fail"' "$RUN5/claims.json" && grep -q '"refuter": "fake:x"' "$RUN5/claims.json"; pass "a failed advisor gets no claims to refute"
+grep -A2 '^## Не ответили' "$RUN5/verdict.md" | grep -q 'fake:fail: failed:1 (exit 1; There is an issue'; pass "verdict lists the failed advisor with the reason"
+
+echo "== done stage with --no-refute"
+RUN6="$("$Q" consult --brief "$TMP/q.md" --stage done --advisors "fake:a, fake:b," --no-refute 2>"$TMP/err")"
+grep -q 'refuter off' "$TMP/err"; pass "consult warns that findings stay unverified"
+for _ in 1 2 3 4 5 6; do "$Q" wait "$RUN6" --interval 1 --max 20 | grep -q "STATE: ready" && break; done
+[ -z "$(ls -d "$RUN6"/refute-* 2>/dev/null)" ] && grep -q 'опровергатель выключен' "$RUN6/verdict.md"; pass "--no-refute is honoured at the acceptance"
+
+echo "== the journal names the orchestrator"
+harness_of() { env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u QUORUM_ORCHESTRATOR -u QR_HARNESS -u CODEX_THREAD_ID -u CODEX_SANDBOX "$@" \
+  bash -c 'ps() { return 1; }; QR_HARNESS=skip; source "$1/bin/lib/common.sh"; detect_harness' _ "$SK"; }
+[ "$(harness_of CODEX_MODEL=x GROK_MODEL=y)" = shell ] && [ "$(harness_of CODEX_THREAD_ID=t)" = codex ] && [ "$(harness_of ZCODE_APP_VERSION=1)" = zcode ]
+pass "CODEX_MODEL alone is not Codex; Codex and ZCode are told apart"
+RUN7="$(env -u CLAUDECODE -u CLAUDE_CODE_ENTRYPOINT -u QUORUM_ORCHESTRATOR ZCODE_APP_VERSION=1 "$Q" consult --brief "$TMP/q.md" --advisors fake:a 2>/dev/null)"
+grep -q '"harness": "zcode"' "$RUN7/meta.json"; pass "consult records the harness in the run"
+for _ in 1 2 3 4 5 6; do "$Q" wait "$RUN7" --interval 1 --max 20 | grep -q "STATE: ready" && break; done
+
 echo "== clean refuses while jobs run"
 RUN4="$(FAKE_DELAY=8 "$Q" consult --brief "$TMP/q.md" --advisors fake:a,fake:b --judge fake:x --no-refute 2>/dev/null)"
+"$Q" wait "$RUN4" --interval 1 --max 1 > "$TMP/w"; [ "$(head -1 "$TMP/w")" = "STATE: running" ]; pass "wait: the first line is exactly STATE: running"
 "$Q" clean "$RUN4" > "$TMP/out"; grep -q 'not removed' "$TMP/out" && [ -d "$RUN4" ]; pass "clean refuses a running run"
 "$Q" clean "$RUN4" --force > "$TMP/out"; grep -q 'removed' "$TMP/out" && [ ! -d "$RUN4" ]; pass "clean --force kills and removes"
 
 echo "== journal and digest"
-"$Q" digest > "$TMP/out"; grep -q 'советов запущено: 4' "$TMP/out"; pass "digest counts consults"
+"$Q" digest > "$TMP/out"; grep -q 'советов запущено: 8' "$TMP/out"; pass "digest counts consults"
+grep -q 'без суда (меньше двух ответов или судья не ответил): 1' "$TMP/out" && grep -q 'без приемлемого решения: 1 ' "$TMP/out"; pass "digest tells a run without a judge from a judge who accepted nothing"
+grep -q 'судья предложил своё решение: 1' "$TMP/out"; pass "digest counts the judge's own solutions"
+grep -q '| fake:fail (advisor) | 1 | 0 |' "$TMP/out"; pass "digest does not count a failed start as an answer"
 grep -q '"event": "judge_done"' "$QUORUM_HOME/usage.jsonl"; pass "journal records the judge's choice when the round finishes"
 grep -q "$WIN ×1" "$TMP/out"; pass "digest counts winners"
 "$Q" clean --all >/dev/null; [ -z "$(ls -d "$QUORUM_HOME"/runs/fixture-* 2>/dev/null)" ]; pass "clean removes runs and worktrees"

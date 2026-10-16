@@ -15,6 +15,8 @@ main() {
   export QR_PROJ_ROOT="$(cat "$RUN/project_root")" QR_TIMEOUT="$(cat "$D/timeout" 2>/dev/null || cat "$RUN/timeout")"
   local BACKEND="$QR_SKILL_DIR/bin/backends/${backend%%:*}.sh"
   [ -f "$BACKEND" ] || { echo "failed:no-backend" > "$D/status"; return 1; }
+  apply_job_settings "$backend" "$(cat "$D/model" 2>/dev/null)" "$(cat "$D/effort" 2>/dev/null)"
+  effective_settings "$backend" > "$D/effective"
   echo running > "$D/status"; now_iso > "$D/started"
   if [ "$mode" = ask ]; then
     timeout -k 60 "$QR_TIMEOUT" bash "$BACKEND" ask "$(cat "$D/prompt.md")" > "$D/raw" 2> "$D/stderr.log"

@@ -42,8 +42,15 @@ quorum config set CODEX_EFFORT xhigh
 
 Файл: `~/.config/quorum/config.env`. Приоритет: переменная окружения → текущий родительский
 тред Codex (только модель и effort, когда скилл запущен из Codex) → файл → значение в
-`bin/lib/defaults.sh`. Один прогон: `QUORUM_JUDGE=opus quorum consult ...`, или флаги
-`--advisors`, `--judge`.
+`bin/lib/defaults.sh`. Один прогон: флаги `--advisors`, `--judge`.
+
+Модель и уровень рассуждений (effort) задаются у каждого советника и у судьи записью
+`ИМЯ[:ВАРИАНТ][=МОДЕЛЬ][@УРОВЕНЬ]`: `--advisors grok@xhigh,glm@max,codex=gpt-6.1-sol@ultra --judge fable@high`.
+Без `=МОДЕЛЬ` и `@УРОВЕНЬ` берутся значения из таблицы ниже. Уровень уходит туда, где его читает
+бэкенд: codex — `model_reasoning_effort`, grok — `--effort`, семейство Claude (glm, kimi, opus,
+fable) — `--effort`; у kimi-cli флага нет, уровень задаётся в `~/.kimi-code/config.toml`.
+Неизвестную модель или уровень CLI отвергает на старте: советник получает статус `failed` с
+причиной, а в вердикте попадает в «Не ответили».
 
 Судья должен быть из семейства, отличного от советников: иначе он судит «своего». Скилл предупреждает,
 но не запрещает. Опровергатель выбирается сам: первый ответивший советник не из семейства
@@ -53,9 +60,10 @@ quorum config set CODEX_EFFORT xhigh
 
 | Переменная | По умолчанию | Смысл |
 |---|---|---|
-| `QUORUM_ADVISORS` | `codex,grok,glm` | советники; `name:variant` запускает один бэкенд дважды |
-| `QUORUM_JUDGE` | `fable` | судья (на приёмке не участвует, кроме роли запасного опровергателя) |
-| `QUORUM_ADVISOR_EFFORT` / `QUORUM_JUDGE_EFFORT` | `max` / `high` | effort для семейства Claude; codex и grok берут `CODEX_EFFORT` / `GROK_EFFORT` |
+| `QUORUM_ADVISORS` | `codex,grok,glm` | советники в записи `ИМЯ[:ВАРИАНТ][=МОДЕЛЬ][@УРОВЕНЬ]`; `name:variant` запускает один бэкенд дважды |
+| `QUORUM_JUDGE` | `fable` | судья, та же запись (на приёмке не участвует, кроме роли запасного опровергателя) |
+| `QUORUM_ADVISOR_EFFORT` / `QUORUM_JUDGE_EFFORT` | `max` / `high` | effort для семейства Claude, когда в записи нет `@УРОВЕНЬ`; codex и grok берут `CODEX_EFFORT` / `GROK_EFFORT` |
+| `QUORUM_ORCHESTRATOR` | определяется сам | имя исполнителя в журнале: claude-code, codex, zcode, grok, kimi или shell |
 | `QUORUM_RETRY` | `1` | повторный круг у судьи после «приемлемого нет»: 0 или 1 |
 | `QUORUM_TIMEOUT` / `QUORUM_JUDGE_TIMEOUT` | `3600` / `1500` | секунд на советника или опровергателя / на судью |
 | `QUORUM_DEPS` | `copy` | зависимости в снапшоте: copy, hardlink, symlink, none |
