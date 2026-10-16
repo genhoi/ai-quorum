@@ -5,6 +5,7 @@
     extract.py meta     FORMAT RAW          # JSON: session_id, turns, tool_calls, cost_usd, duration_ms, tokens
     extract.py progress FORMAT RAW          # one progress line for `quorum status`
     extract.py error    META_JSON           # first error message from a job's meta.json
+    extract.py get      FILE|- KEY [KEY…]   # a field of a JSON file (or stdin) as shell text; "" when missing
     extract.py profile  ROOT [--source]     # project section "## Quorum" / "## Совет" from AGENTS.md or CLAUDE.md
     extract.py brief-check BRIEF TEMPLATE   # exit 1 when the brief is still the template
     extract.py letters  RUN                 # assign A/B/C to finished advisors (letters.json), print the mapping
@@ -340,6 +341,21 @@ def section(text, *titles):
             body.append(l2)
         return "\n".join(body).strip()
     return ""
+
+
+def get(source, keys):
+    """Value at KEYS (a chain into nested objects) of a JSON file, or of stdin for "-", as text for
+    the shell: a missing key or null → "", a list → items joined by spaces, a string or number as is."""
+    data = json.load(sys.stdin) if source == "-" else json.loads(Path(source).read_text(encoding="utf-8"))
+    for k in keys:
+        data = data.get(k) if isinstance(data, dict) else None
+    if data is None:
+        return ""
+    if isinstance(data, list):
+        return " ".join(str(x) for x in data)
+    if isinstance(data, (dict, bool)):
+        return json.dumps(data, ensure_ascii=False)
+    return str(data)
 
 
 # ---------- project profile ----------
@@ -855,6 +871,11 @@ def main(argv):
         print(f"{len(p.tools)} tool calls; last: {last}; text: {snippet}{err}{cost}")
     elif cmd == "error":
         print(first_error(rest[0]))
+    elif cmd == "get":
+        try:
+            print(get(rest[0], rest[1:]))
+        except (OSError, ValueError) as e:
+            sys.exit(f"get: {e}")
     elif cmd == "brief-check":
         err, warning = brief_check(rest[0], rest[1])
         if warning:

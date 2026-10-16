@@ -20,7 +20,7 @@ PY
 case "$1" in
   run|ask)
     role="$(cat "$QR_DIR/role" 2>/dev/null || echo advisor)"
-    stage="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("stage","plan"))' "$QR_RUN/meta.json" 2>/dev/null || echo plan)"
+    stage="$(py get "$QR_RUN/meta.json" stage 2>/dev/null)"; stage="${stage:-plan}"
     backend="$(cat "$QR_DIR/backend" 2>/dev/null || echo fake)"
     variant="${QR_FAKE_VARIANT:-${backend#*:}}"; [ "$variant" != "$backend" ] || variant=a
     if [ "$variant" = fail ]; then   # a CLI that fails at start (unknown model): error text, exit 1, no work

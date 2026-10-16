@@ -32,7 +32,7 @@ PY
   ask)
     # the session to continue belongs to the advisor's directory (a retry job points at it via `parent`)
     src="$(cat "$QR_DIR/parent" 2>/dev/null || echo "$QR_DIR")"
-    tid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("session_id") or "")' "$src/meta.json")"
+    tid="$(py get "$src/meta.json" session_id)"
     [ -n "$tid" ] || die "codex: thread id not found in $src/meta.json"
     model_args=()
     if [ -f "$src/codex-settings.json" ]; then

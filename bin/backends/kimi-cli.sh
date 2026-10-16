@@ -8,7 +8,7 @@ case "$1" in
     exec "$KIMI_BIN" -p "$(cat "$QR_PROMPT")" --output-format stream-json -m "$KIMI_CLI_MODEL" ;;
   ask)
     src="$(cat "$QR_DIR/parent" 2>/dev/null || echo "$QR_DIR")"
-    sid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("session_id") or "")' "$src/meta.json")"
+    sid="$(py get "$src/meta.json" session_id)"
     [ -n "$sid" ] || die "kimi-cli: session id not found in $src/meta.json"
     cd "$QR_SNAPSHOT" || exit 1
     exec "$KIMI_BIN" -S "$sid" -p "$2" --output-format stream-json ;;

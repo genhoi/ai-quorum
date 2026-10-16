@@ -27,6 +27,19 @@ class ParsersTest(unittest.TestCase):
         self.assertEqual(extract.json_block(text)["choice"], "B")
         self.assertEqual(extract.json_block("no json", "choice"), {})
 
+    def test_get(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = Path(tmp) / "m.json"
+            f.write_text(json.dumps({"session_id": None, "feedback": {"A": "текст"}, "advisors": ["fake:a", "glm"],
+                                     "n": 0, "stage": "plan"}), encoding="utf-8")
+            self.assertEqual(extract.get(str(f), ["stage"]), "plan")
+            self.assertEqual(extract.get(str(f), ["session_id"]), "")           # null
+            self.assertEqual(extract.get(str(f), ["missing"]), "")
+            self.assertEqual(extract.get(str(f), ["feedback", "A"]), "текст")
+            self.assertEqual(extract.get(str(f), ["feedback", "A", "deeper"]), "")
+            self.assertEqual(extract.get(str(f), ["advisors"]), "fake:a glm")
+            self.assertEqual(extract.get(str(f), ["n"]), "0")
+
     def test_section(self):
         text = "# T\n\n## Вопрос\nодин\nдва\n\n## Другое\nтри\n"
         self.assertEqual(extract.section(text, "вопрос"), "один\nдва")

@@ -46,7 +46,7 @@ USAGE
 }
 
 lang_dir() { [ -d "$QR_SKILL_DIR/prompts/$QUORUM_LANG" ] || die "unknown language '$QUORUM_LANG'"; printf '%s' "$QR_SKILL_DIR/prompts/$QUORUM_LANG"; }
-meta_get() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print("" if v is None else v if not isinstance(v,list) else " ".join(v))' "$1/meta.json" "$2" 2>/dev/null; }
+meta_get() { py get "$1/meta.json" "$2" 2>/dev/null; }
 
 cmd_doctor() {
   local b out rc
@@ -310,7 +310,7 @@ cmd_advance() {
     rm -f "$tmp"; usage_log judge run="$(basename "$run")" round=1; echo "launched judge-1 ($judge)"; return 3
   fi
   last="$run/judge-$rounds"
-  local choice; choice="$(py judge-choice "$last/report.md" | python3 -c 'import json,sys; print(json.load(sys.stdin)["choice"])')"
+  local choice; choice="$(py judge-choice "$last/report.md" | py get - choice)"
   if [ "$(status_of "$run" "judge-$rounds")" = "done" ] && [ ! -f "$last/logged" ]; then
     py summary "$run" > "$run/summary.json" 2>/dev/null || true
     usage_log judge_done run="$(basename "$run")" round="$rounds" choice="$choice" summary="@$run/summary.json"; touch "$last/logged"
@@ -320,7 +320,7 @@ cmd_advance() {
       local a letter fb tmp; tmp="$(mktemp)"
       for a in $done_adv; do
         letter="$(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(next((k for k,v in m.items() if v==sys.argv[2]), ""))' "$run/letters.json" "$a")"
-        fb="$(py judge-choice "$last/report.md" | python3 -c 'import json,sys; print((json.load(sys.stdin)["feedback"] or {}).get(sys.argv[1], ""))' "$letter")"
+        fb="$(py judge-choice "$last/report.md" | py get - feedback "$letter")"
         [ -n "$fb" ] || fb="Судья не принял ни одно решение. Перепроверь своё по коду и сократи его до необходимого."
         { echo "Судья прочитал решения советников и не выбрал ни одно. Его замечание к твоему решению:"; echo; echo "$fb"; echo
           echo "Переделай ответ с учётом замечания, в том же формате, целиком (это новый полный ответ, не дополнение). Если замечание неверно, скажи почему с уликой из кода. Сохрани ответ и в ANSWER.md."; } > "$tmp"
@@ -339,7 +339,7 @@ cmd_advance() {
   case "$choice" in
     none) ;;
     own)  winner="judge-$rounds" ;;
-    *)    winner="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$run/letters.json" "$choice")" ;;
+    *)    winner="$(py get "$run/letters.json" "$choice")" ;;
   esac
   [ -z "$winner" ] || echo "$winner" > "$run/winner"
   if [ -n "$winner" ] && [ "$(cat "$run/refute")" = 1 ] && [ -z "$(run_jobs "$run" refuter)" ]; then
